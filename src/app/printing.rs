@@ -39,6 +39,7 @@ impl FontCraftApp {
                     info: format!("{} · {n} style{}", f.ext, if n == 1 { "" } else { "s" }),
                     path: face.path.clone(),
                     index: face.index,
+                    rtl: f.rtl.clone(),
                 }
             })
             .collect();

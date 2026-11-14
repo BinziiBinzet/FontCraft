@@ -37,6 +37,17 @@ impl FontCraftApp {
         }
     }
 
+    /// The font file the preview of an online family uses (its regular style in the library, or the
+    /// downloaded preview), for previews that have to be shaped.
+    fn gpreview_file(&self, gi: usize) -> Option<(PathBuf, u32)> {
+        if let Some(fi) = self.gfam_faces(gi).first().map(|f| self.face_fam[*f]) {
+            let m = &self.faces[self.families[fi].primary].meta;
+            return Some((m.path.clone(), m.index));
+        }
+        let p = google::preview_path(&self.gcat[gi].key());
+        p.exists().then_some((p, 0))
+    }
+
     fn gprovider(&self) -> Provider {
         match self.view {
             View::Online(p) => p,
@@ -218,7 +229,21 @@ impl FontCraftApp {
                 };
                 let pp_ = ui.painter_at(prev_rect);
                 let wrap = tile.then_some(prev_rect.width());
+                // right-to-left families (Google says which) get a sample in their script, shaped
+                let ftext = super::rtl::text_for(&text, &self.gcat[gi].rtl);
+                let shaped = crate::shape::needs_shaping(&ftext);
                 match self.gpreview_font(gi) {
+                    (Some(_), _) if shaped => {
+                        let painted = match self.gpreview_file(gi) {
+                            Some((path, index)) => self.shaped.paint(&pp_, prev_rect, &path, index, &ftext, size, fg, align, wrap),
+                            None => false,
+                        };
+                        if !painted {
+                            let w = (prev_rect.width() * 0.4).min(size * 8.0);
+                            let x = if crate::shape::base_rtl(&ftext) { prev_rect.right() - w - 2.0 } else { prev_rect.left() + 2.0 };
+                            pp_.rect_filled(Rect::from_min_size(pos2(x, prev_rect.top() + size * 0.2), vec2(w, size * 0.75)), CornerRadius::same(4), p.skeleton);
+                        }
+                    }
                     (Some(ff), _) => paint_on_baseline(&pp_, prev_rect, &text, FontId::new(size, ff), fg, align, wrap),
                     (None, Some(why)) => {
                         pp_.text(prev_rect.left_top() + vec2(2.0, 6.0), Align2::LEFT_TOP, why, FontId::proportional(13.0), p.weak);

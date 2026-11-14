@@ -1,6 +1,6 @@
 [package]
 name = "fontcraft"
-version = "1.3.0"
+version = "1.3.1"
 edition = "2021"
 license = "MIT"
 description = "FontCraft - a free font manager: organise, preview and activate fonts without installing them."
@@ -13,6 +13,10 @@ winit = "0.30"
 egui = { version = "0.31", default-features = false }
 ab_glyph = "0.2"
 ttf-parser = "0.25"
+# right-to-left and other complex scripts: joining Arabic letters (shaping, the Rust port of HarfBuzz)
+# and putting mixed right-to-left / left-to-right text in the right order (the Unicode bidi rules)
+rustybuzz = "0.20"
+unicode-bidi = "0.3"
 rfd = "0.15"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif", "tiff"] }
 # reading pictures from the clipboard for the Font finder

@@ -110,6 +110,8 @@ pub struct GFamily {
     /// Fontshare: the regular style's file; Font Squirrel: the main file inside the download.
     pub preview_src: String,
     pub license: String,
+    /// The right-to-left script the family is made for ("Arabic", "Hebrew"…), or empty.
+    pub rtl: String,
 }
 
 impl GFamily {
@@ -265,6 +267,13 @@ pub fn parse_catalog(text: &str) -> Vec<GFamily> {
                 slug: String::new(),
                 preview_src: String::new(),
                 license: String::new(),
+                // Google's list names the script a family is made for ("Arab", "Hebr"…)
+                rtl: f
+                    .get("primaryScript")
+                    .and_then(|s| s.as_str())
+                    .and_then(crate::shape::rtl_script_name)
+                    .unwrap_or("")
+                    .to_string(),
                 thickness: rating("thickness"),
                 width: rating("width"),
                 lower: name.to_lowercase(),

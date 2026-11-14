@@ -415,6 +415,15 @@ impl FontCraftApp {
                                     ui.close_menu();
                                 }
                             }
+                            ui.separator();
+                            ui.label(RichText::new("RIGHT TO LEFT").size(11.0).color(p.weak));
+                            for (label, t) in RTL_PRESETS {
+                                if ui.button(*label).on_hover_text("Written and aligned from right to left").clicked() {
+                                    self.cfg.preview_text = t.to_string();
+                                    self.dirty = true;
+                                    ui.close_menu();
+                                }
+                            }
                         })
                         .response
                         .on_hover_text("Sample texts");
@@ -436,17 +445,34 @@ impl FontCraftApp {
                             }
                         }
                         let w = ui.available_width();
-                        if ui
-                            .add(
-                                egui::TextEdit::singleline(&mut self.cfg.preview_text)
-                                    .hint_text("Type your preview text…")
-                                    .frame(false)
-                                    .desired_width(w)
-                                    .text_color(p.text),
-                            )
-                            .changed()
-                        {
+                        // Right-to-left text sits on the right. While the field isn't being typed in, it is
+                        // shown shaped (joined letters, right to left) in the interface font.
+                        let id = Id::new("previewtext");
+                        let typing = ui.memory(|m| m.has_focus(id));
+                        let text = self.cfg.preview_text.clone();
+                        let rtl = crate::shape::base_rtl(&text);
+                        let ui_font = self.ui_font_file.clone();
+                        let overlay = !typing
+                            && crate::shape::needs_shaping(&text)
+                            && ui_font.as_ref().map(|f| self.shaped.covers(f, &text)).unwrap_or(false);
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.cfg.preview_text)
+                                .id(id)
+                                .hint_text("Type your preview text…")
+                                .frame(false)
+                                .desired_width(w)
+                                .horizontal_align(if rtl { Align::Max } else { Align::Min })
+                                .text_color(if overlay { Color32::TRANSPARENT } else { p.text }),
+                        );
+                        if resp.changed() {
                             self.dirty = true;
+                        }
+                        if let (true, Some(f)) = (overlay, ui_font) {
+                            let size = 14.0;
+                            let r = resp.rect.shrink2(vec2(2.0, 0.0));
+                            let area = Rect::from_min_max(pos2(r.left(), r.center().y - size * 0.72), pos2(r.right(), r.bottom()));
+                            let painter = ui.painter_at(resp.rect);
+                            self.shaped.paint(&painter, area, &f, 0, &text, size, p.text, config::TextAlign::Left, None);
                         }
                     });
                 });

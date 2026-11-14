@@ -52,6 +52,11 @@ Right-click a font › *Delete…* (or select several and press Delete). FontCra
   needs itself are marked and left out by default, and FontCraft explains the risks on Windows, macOS and Linux.
   Your system asks for administrator permission where needed.
 
+### Right-to-left scripts
+Arabic, Hebrew, Persian, Urdu and other right-to-left fonts are recognised and previewed in their own script,
+aligned to the right and written from right to left with properly joined letters – also with your own text
+from the preview field, and in printed PDFs.
+
 ### Smart filters and printing
 Save searches as smart filters ("Languages contains Arabic", "Category is Sans Serif", "Activation is Activated"…).
 Right-click a collection, tag or smart filter and choose **Print…** for a PDF of all its fonts with your preview

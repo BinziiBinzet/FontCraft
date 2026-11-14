@@ -460,6 +460,13 @@ impl FontCraftApp {
                     let r = painter.text(pos2(tx, hy), Align2::LEFT_CENTER, "installed", FontId::proportional(10.5), hcol.gamma_multiply(0.5));
                     tx = r.right() + 8.0;
                 }
+                // the same style in more than one file (all copies are listed in the details)
+                let dups = fam.files.len().saturating_sub(fam.faces.len());
+                if dups > 0 {
+                    let t = if dups == 1 { "1 duplicate".to_string() } else { format!("{dups} duplicates") };
+                    let r = painter.text(pos2(tx, hy), Align2::LEFT_CENTER, t, FontId::proportional(10.5), p.accent);
+                    tx = r.right() + 8.0;
+                }
                 // your own tags first (as chips), then the ones FontCraft worked out
                 let limit = rect.right() - 60.0;
                 for (t, set) in &self.cfg.tags {
@@ -481,7 +488,17 @@ impl FontCraftApp {
                 }
                 let prev_rect = Rect::from_min_max(pos2(rect.left() + 14.0, rect.top() + 20.0), pos2(rect.right() - 40.0, rect.bottom()));
                 let pp_ = ui.painter_at(prev_rect);
+                // right-to-left fonts get a sample in their script; such text is shaped and set right to left
+                let ftext = super::rtl::text_for(&text, &fam.rtl);
+                let shaped = crate::shape::needs_shaping(&ftext);
                 match self.loader.family(face.id, &face.meta.path, face.meta.index) {
+                    Some(_) if shaped => {
+                        if !self.shaped.paint(&pp_, prev_rect, &face.meta.path, face.meta.index, &ftext, size, fg, align, None) {
+                            let w = (prev_rect.width() * 0.4).min(size * 8.0);
+                            let x = if crate::shape::base_rtl(&ftext) { prev_rect.right() - w - 2.0 } else { prev_rect.left() + 2.0 };
+                            pp_.rect_filled(Rect::from_min_size(pos2(x, prev_rect.top() + size * 0.2), vec2(w, size * 0.75)), CornerRadius::same(4), p.skeleton);
+                        }
+                    }
                     Some(ff) => {
                         paint_on_baseline(&pp_, prev_rect, &text, FontId::new(size, ff), fg, align, None);
                     }
@@ -599,7 +616,15 @@ impl FontCraftApp {
                     }
                     let prev = Rect::from_min_max(pos2(inner.left(), inner.top() + 22.0), inner.max);
                     let pp_ = ui.painter_at(prev);
+                    let ftext = super::rtl::text_for(&text, &fam.rtl);
+                    let shaped = crate::shape::needs_shaping(&ftext);
                     match self.loader.family(face.id, &face.meta.path, face.meta.index) {
+                        Some(_) if shaped => {
+                            let (size, align, w) = (self.cfg.preview_size, self.cfg.align, prev.width());
+                            if !self.shaped.paint(&pp_, prev, &face.meta.path, face.meta.index, &ftext, size, fg, align, Some(w)) {
+                                pp_.rect_filled(Rect::from_min_size(prev.min + vec2(0.0, 6.0), vec2(prev.width() * 0.7, size * 0.75)), CornerRadius::same(4), p.skeleton);
+                            }
+                        }
                         Some(ff) => {
                             let w = prev.width();
                             paint_on_baseline(&pp_, prev, &text, FontId::new(self.cfg.preview_size, ff), fg, self.cfg.align, Some(w));

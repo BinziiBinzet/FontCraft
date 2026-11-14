@@ -9,6 +9,7 @@ mod misc;
 mod playground;
 mod printing;
 mod removal;
+mod rtl;
 mod settings;
 mod shortcuts;
 mod smart;
@@ -59,6 +60,8 @@ pub struct Family {
     pub auto_tags: Vec<&'static str>,
     /// languages any of its styles has letters for (bits of `library::LANGUAGES`)
     pub scripts: u32,
+    /// the right-to-left script it is made for ("Arabic", "Hebrew"…), or empty
+    pub rtl: String,
 }
 
 pub struct FolderNode {
@@ -256,6 +259,15 @@ const PRESETS: &[&str] = &[
     "Handgloves",
 ];
 
+/// Right-to-left sample texts (name in the menu, text).
+const RTL_PRESETS: &[(&str, &str)] = &[
+    ("Arabic", "نص حكيم له سر قاطع وذو شأن عظيم مكتوب على ثوب أخضر ومغلف بجلد أزرق"),
+    ("Persian", "به نام خداوند جان و خرد کزین برتر اندیشه برنگذرد"),
+    ("Urdu", "یہ ایک نمونہ عبارت ہے جو خط کی خوبصورتی دکھاتی ہے"),
+    ("Hebrew", "דג סקרן שט בים מאוכזב ולפתע מצא לו חברה"),
+    ("Arabic and Latin mixed", "مرحبا بالعالم – Hello world 2026"),
+];
+
 /// Tags FontCraft works out by itself from the font's classification and measured shape.
 fn auto_tags(class: &str, shape: Option<crate::library::Shape>, mono: bool, variable: bool, italic: bool) -> Vec<&'static str> {
     let mut t = vec![];
@@ -439,6 +451,10 @@ pub struct FontCraftApp {
     import_ask: Option<import::ImportPlan>,
     /// what the last import did (shown as a report)
     import_done: Option<import::ImportReport>,
+    /// previews in right-to-left and other complex scripts
+    shaped: rtl::ShapedText,
+    /// the interface font's file (for showing right-to-left text in the preview field)
+    ui_font_file: Option<PathBuf>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -504,6 +520,8 @@ impl FontCraftApp {
             smart_edit: None,
             import_ask: None,
             import_done: None,
+            shaped: rtl::ShapedText::new(cc.egui_ctx.clone()),
+            ui_font_file: crate::uifont::interface_font_file(),
             google,
             gcat: vec![],
             gstates: [GState::Loading, GState::Loading, GState::Loading],
@@ -790,9 +808,9 @@ impl FontCraftApp {
                     self.set_status(format!("{} can't be reached right now – its active fonts come back when it's online again", w.display()));
                 }
             }
-            if self.shot.is_none() {
-                config::save_cache(&cache);
-            }
+            // (also when only taking a picture: it is just what is known about each font file, and it
+            // spares the next start reading them all again)
+            config::save_cache(&cache);
             let before: HashSet<String> = self.faces.iter().filter(|f| !f.system).map(|f| f.path_key.clone()).collect();
             self.rebuild(faces);
             if self.scans_done > 0 {
@@ -832,6 +850,17 @@ impl FontCraftApp {
             }
             self.scans_done += 1;
             // for pictures of the windows: FONTCRAFT_SHOW=delete|network
+            if self.scans_done == 1 && self.shot.is_some() {
+                let s = std::env::var("FONTCRAFT_SHOW").unwrap_or_default();
+                if s.contains("arabicfolder") {
+                    if let Some(n) = self.nodes.iter().find(|n| n.name == "Arabic") {
+                        self.view = View::Folder(n.path.clone());
+                    }
+                }
+                if s.contains("rtltext") {
+                    self.cfg.preview_text = RTL_PRESETS[4].1.to_string();
+                }
+            }
             if self.scans_done == 1 {
                 match std::env::var("FONTCRAFT_SHOW").as_deref() {
                     Ok("delete") => {
@@ -921,6 +950,7 @@ impl FontCraftApp {
                     shapes: vec![],
                     auto_tags: vec![],
                     scripts: 0,
+                    rtl: String::new(),
                 });
                 self.families.len() - 1
             });
@@ -959,6 +989,12 @@ impl FontCraftApp {
             extra.push_str(&format!(" {}", pm.copyright));
             fam.shapes = fam.faces.iter().filter_map(|i| faces[*i].meta.shape).collect();
             fam.scripts = fam.faces.iter().fold(0, |b, i| b | faces[*i].meta.scripts);
+            fam.rtl = std::iter::once(&fam.primary)
+                .chain(fam.faces.iter())
+                .map(|i| &faces[*i].meta.rtl)
+                .find(|r| !r.is_empty())
+                .cloned()
+                .unwrap_or_default();
             fam.auto_tags = auto_tags(&pm.class, pm.shape, fam.mono, fam.variable, fam.italic);
             for t in &fam.auto_tags {
                 extra.push(' ');
@@ -988,7 +1024,9 @@ impl FontCraftApp {
         self.families = order.iter().map(|i| old[*i].take().unwrap()).collect();
         self.face_fam = vec![0; self.faces.len()];
         for (fi, f) in self.families.iter().enumerate() {
-            for x in &f.faces {
+            // every file, also the copies of a style that are shown once (duplicates) – otherwise a
+            // folder holding only a duplicate would show some other family
+            for x in &f.files {
                 self.face_fam[*x] = fi;
             }
         }
@@ -1875,7 +1913,9 @@ impl FontCraftApp {
         let Some(shot) = &mut self.shot else { return };
         ctx.request_repaint();
         let ready = self.scan_rx.is_none() && self.loader.pending() == 0 && self.finder.job.is_none() && self.finder.waiting.is_none();
-        if ready || shot.started.elapsed().as_secs() > 45 {
+        // a large library being read for the first time can take a while (FONTCRAFT_SHOT_WAIT: seconds)
+        let wait = std::env::var("FONTCRAFT_SHOT_WAIT").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(45);
+        if ready || shot.started.elapsed().as_secs() > wait {
             shot.frames += 1;
         }
         if shot.frames >= 120 && !shot.requested {
@@ -1900,7 +1940,7 @@ impl FontCraftApp {
                 }
             }
         });
-        if done || shot.started.elapsed().as_secs() > 150 {
+        if done || shot.started.elapsed().as_secs() > 150.max(wait + 60) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
@@ -1918,6 +1958,7 @@ impl eframe::App for FontCraftApp {
         }
         self.first_frame = false;
         self.loader.begin_frame();
+        self.shaped.begin_frame();
         self.apply_theme(ctx);
         self.poll_scan();
         self.poll_watch();

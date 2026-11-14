@@ -48,6 +48,9 @@ pub struct FaceMeta {
     /// The languages / writing systems it has letters for: one bit per entry of `LANGUAGES`.
     #[serde(default)]
     pub scripts: u32,
+    /// The right-to-left script the font is made for ("Arabic", "Hebrew"…), or empty.
+    #[serde(default)]
+    pub rtl: String,
 }
 
 /// Languages and writing systems, each with letters a font needs to have for it.
@@ -82,12 +85,13 @@ fn scripts_of(face: &Face) -> u32 {
     bits
 }
 
-/// Only the languages of the faces in a file (for fonts read by an older FontCraft).
+/// Only the languages and writing direction of the faces in a file (for fonts read by an older FontCraft).
 fn add_scripts(path: &Path, faces: &mut [FaceMeta]) {
     let Ok(data) = std::fs::read(path) else { return };
     for f in faces {
         if let Ok(face) = Face::parse(&data, f.index) {
             f.scripts = scripts_of(&face);
+            f.rtl = crate::shape::rtl_script_of(&face, &f.family);
         }
     }
 }
@@ -317,6 +321,7 @@ pub fn parse_file(path: &Path) -> Vec<FaceMeta> {
             shape: measure_shape(&data, index, &face),
             class: panose_class(&face),
             scripts: scripts_of(&face),
+            rtl: crate::shape::rtl_script_of(&face, &family),
             family,
             style,
         });
@@ -363,7 +368,7 @@ pub struct CacheEntry {
     pub version: u32,
 }
 
-const CACHE_VERSION: u32 = 4;
+const CACHE_VERSION: u32 = 5;
 
 pub type ScanCache = HashMap<String, CacheEntry>;
 
@@ -469,8 +474,8 @@ pub fn spawn_scan(folders: Vec<PathBuf>, cache: ScanCache, ctx: egui::Context) -
             let stamp = file_stamp(&p).unwrap_or((0, 0));
             let entry = match cache.get(&key) {
                 Some(c) if c.mtime == stamp.0 && c.size == stamp.1 && c.version == CACHE_VERSION => c.clone(),
-                // read by FontCraft 1.2: only the languages are new
-                Some(c) if c.mtime == stamp.0 && c.size == stamp.1 && c.version == 3 => {
+                // read by an older FontCraft: only the languages and the writing direction are new
+                Some(c) if c.mtime == stamp.0 && c.size == stamp.1 && (c.version == 3 || c.version == 4) => {
                     let mut c = c.clone();
                     add_scripts(&p, &mut c.faces);
                     c.version = CACHE_VERSION;

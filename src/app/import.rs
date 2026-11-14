@@ -57,9 +57,12 @@ pub fn dup_label(a: DupAction, same_path: bool) -> &'static str {
 const SAME_PATH_CHOICES: [DupAction; 3] = [DupAction::UseExisting, DupAction::Replace, DupAction::Skip];
 const DUP_CHOICES: [DupAction; 4] = [DupAction::ImportDuplicate, DupAction::UseExisting, DupAction::Replace, DupAction::Skip];
 
-/// A free name for `target` (an identical file already there counts as free).
-fn free_name(src: &Path, target: PathBuf) -> PathBuf {
-    let same = |p: &Path| std::fs::metadata(p).map(|m| Some(m.len()) == std::fs::metadata(src).ok().map(|s| s.len())).unwrap_or(false);
+/// A free name for `target`. With `reuse_identical` an identical file already there counts as free
+/// (nothing needs copying); without it there is always a new file ("Font (2).ttf").
+fn free_name(src: &Path, target: PathBuf, reuse_identical: bool) -> PathBuf {
+    let same = |p: &Path| {
+        reuse_identical && std::fs::metadata(p).map(|m| Some(m.len()) == std::fs::metadata(src).ok().map(|s| s.len())).unwrap_or(false)
+    };
     if !target.exists() || same(&target) {
         return target;
     }
@@ -74,12 +77,14 @@ fn free_name(src: &Path, target: PathBuf) -> PathBuf {
     target
 }
 
-fn copy_into(src: &Path, target: PathBuf, keep_both: bool) -> Result<PathBuf, String> {
-    let t = if keep_both { free_name(src, target) } else { target };
+/// Copy `src` to `target` (or the next free name). `duplicate`: always make a new file, even when
+/// the very same file is already there – that is what "import as a duplicate" asks for.
+fn copy_into(src: &Path, target: PathBuf, duplicate: bool) -> Result<PathBuf, String> {
+    let t = free_name(src, target, !duplicate);
     if let Some(d) = t.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
-    if t.exists() && std::fs::metadata(&t).map(|m| m.len()).ok() == std::fs::metadata(src).map(|m| m.len()).ok() {
+    if !duplicate && t.exists() && std::fs::metadata(&t).map(|m| m.len()).ok() == std::fs::metadata(src).map(|m| m.len()).ok() {
         return Ok(t);
     }
     std::fs::copy(src, &t).map_err(|e| e.to_string())?;
@@ -113,14 +118,18 @@ mod tests {
         std::fs::create_dir_all(d.join("src")).unwrap();
         let a = d.join("src").join("Font.ttf");
         std::fs::write(&a, b"one font").unwrap();
-        let first = copy_into(&a, d.join("lib").join("Font.ttf"), true).unwrap();
+        let first = copy_into(&a, d.join("lib").join("Font.ttf"), false).unwrap();
         assert_eq!(first, d.join("lib").join("Font.ttf"));
-        // the same file again: nothing new
-        assert_eq!(copy_into(&a, d.join("lib").join("Font.ttf"), true).unwrap(), first);
+        // the same file again as a new font: nothing new
+        assert_eq!(copy_into(&a, d.join("lib").join("Font.ttf"), false).unwrap(), first);
         // a different font with the same file name: kept next to it
         let b = d.join("src").join("Other.ttf");
         std::fs::write(&b, b"another, longer font").unwrap();
-        assert_eq!(copy_into(&b, d.join("lib").join("Font.ttf"), true).unwrap(), d.join("lib").join("Font (2).ttf"));
+        assert_eq!(copy_into(&b, d.join("lib").join("Font.ttf"), false).unwrap(), d.join("lib").join("Font (2).ttf"));
+        // "import as a duplicate" of the very same file: there really is a second file afterwards
+        let dup = copy_into(&a, d.join("lib").join("Font.ttf"), true).unwrap();
+        assert_eq!(dup, d.join("lib").join("Font (3).ttf"));
+        assert_eq!(std::fs::read(&dup).unwrap(), b"one font");
         let _ = std::fs::remove_dir_all(&d);
         let t = today();
         assert_eq!(t.len(), 10, "{t}");
@@ -231,7 +240,7 @@ impl FontCraftApp {
         let mut reread: Vec<String> = vec![];
         let mut keep_active: Vec<String> = vec![];
         for (src, rel) in plan.new {
-            match copy_into(&src, root.join(&rel), true) {
+            match copy_into(&src, root.join(&rel), false) {
                 Ok(t) => {
                     activate.push(t.clone());
                     rep.imported.push(t);
@@ -276,7 +285,7 @@ impl FontCraftApp {
                         activation::deactivate(std::slice::from_ref(&d.existing));
                         let _ = std::fs::remove_file(&d.existing);
                         forget.push(d.existing.to_string_lossy().to_string());
-                        match copy_into(&d.src, root.join(&d.rel), true) {
+                        match copy_into(&d.src, root.join(&d.rel), false) {
                             Ok(t) => {
                                 // the new file takes over from an active old one in any case
                                 if was_active {

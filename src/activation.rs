@@ -98,8 +98,7 @@ fn unload(p: &Path) {
 /// Which files in the user's font folder FontCraft put there, and for which original
 /// (`placed-fonts.json` in FontCraft's settings folder). The files keep their own names – that is
 /// the name apps like Illustrator copy into a package – so this list is how FontCraft tells its
-/// files from fonts the person installed themselves.
-#[cfg(windows)]
+/// files from fonts the person installed themselves. (On every system: Windows, macOS and Linux.)
 mod placed {
     use std::collections::{BTreeMap, HashSet};
     use std::path::{Path, PathBuf};
@@ -147,20 +146,38 @@ mod placed {
 /// Files FontCraft placed in the system's font folders (lower-case paths), so the library scan
 /// doesn't show them a second time as system fonts.
 pub fn placed_files() -> std::collections::HashSet<String> {
-    #[cfg(windows)]
-    {
-        placed::set()
-    }
-    #[cfg(not(windows))]
-    {
-        Default::default()
-    }
+    placed::set()
 }
 
-/// Put the font into the user's font folder under its own file name: a hard link when it is on
-/// the same drive (no extra space), otherwise a copy. Returns the file in the font folder.
-/// Fails when the person already installed the very same font file themselves.
-#[cfg(windows)]
+/// Is there a file (or a link, even a broken one) at this place?
+fn present(p: &Path) -> bool {
+    p.symlink_metadata().is_ok()
+}
+
+/// Take a font file out of this login session (Windows only; elsewhere the font folder is enough).
+fn unload_any(_p: &Path) {
+    #[cfg(windows)]
+    unload(_p);
+}
+
+/// Make `target` show the font `p`: a hard link when both are on the same drive (no extra space,
+/// and every app sees the real file), else – on macOS and Linux – a symbolic link, else a copy.
+fn link_or_copy(p: &Path, target: &Path) -> Result<(), String> {
+    if std::fs::hard_link(p, target).is_ok() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        if std::os::unix::fs::symlink(p, target).is_ok() {
+            return Ok(());
+        }
+    }
+    std::fs::copy(p, target).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Put the font into the user's font folder under its own file name (that is the name apps like
+/// Illustrator and InDesign copy into a package). Returns the file in the font folder.
+/// Fails ("already installed") when the person installed the very same font file themselves.
 fn place_in_font_folder(p: &Path) -> Result<PathBuf, String> {
     let dir = link_dir().ok_or("no font folder")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -171,12 +188,13 @@ fn place_in_font_folder(p: &Path) -> Result<PathBuf, String> {
         Some(t) => {
             match std::fs::metadata(&t) {
                 Ok(m) if m.len() == size => return Ok(t),
-                // the original changed (a newer version of the font): place it again
-                Ok(_) => {
-                    unload(&t);
-                    let _ = std::fs::remove_file(&t);
+                // the original changed (a newer version of the font), or the link is broken: place it again
+                _ => {
+                    if present(&t) {
+                        unload_any(&t);
+                        let _ = std::fs::remove_file(&t);
+                    }
                 }
-                Err(_) => {}
             }
             t
         }
@@ -187,7 +205,7 @@ fn place_in_font_folder(p: &Path) -> Result<PathBuf, String> {
             let ext = p.extension().map(|s| format!(".{}", s.to_string_lossy())).unwrap_or_default();
             let mut t = dir.join(&name);
             let mut k = 2;
-            while t.exists() || ours.contains(&t.to_string_lossy().to_lowercase()) {
+            while present(&t) || ours.contains(&t.to_string_lossy().to_lowercase()) {
                 let theirs = !ours.contains(&t.to_string_lossy().to_lowercase());
                 if theirs && std::fs::metadata(&t).map(|m| m.len() == size).unwrap_or(false) {
                     return Err("already installed".into());
@@ -199,7 +217,7 @@ fn place_in_font_folder(p: &Path) -> Result<PathBuf, String> {
             t
         }
     };
-    std::fs::hard_link(p, &target).or_else(|_| std::fs::copy(p, &target).map(|_| ())).map_err(|e| e.to_string())?;
+    link_or_copy(p, &target)?;
     map.insert(target.to_string_lossy().to_string(), p.to_string_lossy().to_string());
     placed::save(&map);
     Ok(target)
@@ -232,12 +250,12 @@ fn activate_one(p: &Path) -> Result<(), String> {
 }
 
 /// Unload, unlist and delete a file FontCraft placed in the font folder.
-#[cfg(windows)]
 fn forget_placed(file: &Path) {
+    #[cfg(windows)]
     userfonts::unregister(file);
-    unload(file);
+    unload_any(file);
     // (an app that still has it open keeps it until FontCraft tidies up at its next start)
-    if std::fs::remove_file(file).is_ok() || !file.exists() {
+    if std::fs::remove_file(file).is_ok() || !present(file) {
         let _g = placed::guard();
         let mut map = placed::load();
         let key = file.to_string_lossy().to_lowercase();
@@ -263,30 +281,25 @@ fn deactivate_one(p: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Tidy up after fonts that are no longer active (Windows): FontCraft's entries in the user's font
-/// list and its files in the user's font folder that don't belong to an active font are removed –
-/// for example after FontCraft was closed in a way that left them behind.
+/// Tidy up after fonts that are no longer active: FontCraft's files in the user's font folder (and,
+/// on Windows, its entries in the user's font list) that don't belong to an active font are removed
+/// – for example after FontCraft was closed in a way that left them behind, or the links with
+/// "FontCraft-…" names of older versions.
 pub fn sync_listed(active: &[PathBuf]) {
-    #[cfg(windows)]
-    {
-        let active: std::collections::HashSet<String> = active.iter().map(|a| a.to_string_lossy().to_lowercase()).collect();
-        prune(&active);
-    }
-    #[cfg(not(windows))]
-    let _ = active;
+    let active: std::collections::HashSet<String> = active.iter().map(|a| a.to_string_lossy().to_lowercase()).collect();
+    prune(&active);
 }
 
 /// The placed files (lower-case) that belong to one of these active originals (lower-case), looked
 /// up in the record as it is right now – fonts being switched on at the same moment are kept.
-#[cfg(windows)]
 fn kept(active: &std::collections::HashSet<String>) -> std::collections::HashSet<String> {
     placed::load().into_iter().filter(|(_, o)| active.contains(&o.to_lowercase())).map(|(p, _)| p.to_lowercase()).collect()
 }
 
 /// Remove FontCraft's font-list entries and font-folder files that don't belong to an active font
 /// (`active`: lower-case paths of the original files).
-#[cfg(windows)]
 fn prune(active: &std::collections::HashSet<String>) {
+    #[cfg(windows)]
     userfonts::prune(&|| kept(active));
     let Some(dir) = link_dir() else { return };
     let mut gone = false;
@@ -515,40 +528,38 @@ fn notify() {
     }
 }
 
+/// macOS and Linux: the font appears in the user's font folder (~/Library/Fonts, or
+/// ~/.local/share/fonts/FontCraft) under its own file name – a hard link when it is on the same
+/// drive, so every app sees the real font file, and "Package" in Illustrator or InDesign copies it
+/// with its own name.
 #[cfg(unix)]
 fn activate_one(p: &Path) -> Result<(), String> {
     if !p.exists() {
         return Err("file not found".into());
     }
-    let link = link_path(p).ok_or("no home folder")?;
-    if let Some(dir) = link.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    match link.symlink_metadata() {
-        // a symbolic link from an older FontCraft is turned into a hard link (below)
-        Ok(m) if m.file_type().is_symlink() => {
-            let _ = std::fs::remove_file(&link);
+    // FontCraft 1.3.0 and earlier named the links "FontCraft-<code>-<file>"; they go
+    if let Some(old) = link_path(p) {
+        if present(&old) {
+            let _ = std::fs::remove_file(&old);
         }
-        Ok(_) => return Ok(()),
-        Err(_) => {}
     }
-    // A hard link looks like the font file itself to every app, so "Package" in Illustrator
-    // or InDesign copies the real font. Across drives (or on network folders) that isn't
-    // possible and a symbolic link is used instead.
-    if std::fs::hard_link(p, &link).is_ok() {
-        return Ok(());
-    }
-    match std::os::unix::fs::symlink(p, &link) {
-        Ok(()) => Ok(()),
-        Err(_) => std::fs::copy(p, &link).map(|_| ()).map_err(|e| e.to_string()),
+    match place_in_font_folder(p) {
+        Ok(_) => Ok(()),
+        // the very same file is installed already: the font is available as it is
+        Err(e) if e == "already installed" => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
 #[cfg(unix)]
 fn deactivate_one(p: &Path) -> Result<(), String> {
-    let link = link_path(p).ok_or("no home folder")?;
-    if link.symlink_metadata().is_ok() {
-        std::fs::remove_file(&link).map_err(|e| e.to_string())?;
+    if let Some(f) = placed::for_original(&placed::load(), p) {
+        forget_placed(&f);
+    }
+    if let Some(old) = link_path(p) {
+        if present(&old) {
+            std::fs::remove_file(&old).map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }

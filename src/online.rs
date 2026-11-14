@@ -155,6 +155,7 @@ fn base_family(p: Provider, name: String, slug: String, kind: String) -> GFamily
         slug,
         preview_src: String::new(),
         license: String::new(),
+        rtl: String::new(),
     }
 }
 
@@ -539,6 +540,7 @@ mod tests {
             slug: "fc-test-squirrel".into(),
             preview_src: "FCTestSquirrel-Regular.otf".into(),
             license: String::new(),
+            rtl: String::new(),
         };
         let since = SystemTime::now();
         let mut tried = std::collections::HashMap::new();

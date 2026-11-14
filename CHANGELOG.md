@@ -1,5 +1,35 @@
 # What's new in FontCraft
 
+## 1.3.1
+
+### New: right-to-left fonts (Arabic, Hebrew, Persian, Urdu…)
+* FontCraft recognises fonts made for a right-to-left script: from the design languages the font lists itself
+  (its `meta` table), from its letters (right-to-left letters but no Latin ones), or from its name ("… Arabic",
+  "… Naskh", "… Hebrew"…). For Google Fonts the list's own script information is used.
+* These fonts show a sample in their own script, aligned to the right and written from right to left, with the
+  letters joined the way the script needs (FontCraft now shapes text with the HarfBuzz rules). Alignment follows:
+  "align left" means the start of the line, which is on the right for these scripts.
+* Type Arabic or Hebrew into the preview field at the bottom and every font shows it that way; mixed
+  right-to-left and left-to-right text comes out in the right order. The field sits on the right for such
+  text, and the Samples menu has Arabic, Persian, Urdu, Hebrew and mixed samples. Joined Indic scripts
+  (Devanagari, Bengali, Tamil…) are shaped, too.
+* Printed PDFs show right-to-left fonts the same way.
+* The first start after the update notes the writing direction of every font once (a large library takes a
+  minute or two).
+
+### Fixed: "Package" on the Mac keeps the fonts' own file names
+* On macOS (and Linux) active fonts now appear in your font folder under their own file names, as on Windows,
+  so "Package" in Illustrator, InDesign and other apps copies them as `Font-Bold.otf` instead of
+  `FontCraft-…-Font-Bold.otf`. The links with the long names from earlier versions are replaced the first time
+  FontCraft starts after the update. Fonts you installed yourself are never touched.
+
+### Fixed: "Import as a duplicate" really makes a duplicate
+* When the very same file was already in the import folder, FontCraft reported "imported as duplicate" but didn't
+  copy anything. Now there is always a second file ("Font (2).ttf").
+* Duplicates are no longer hidden: a family with the same style in more than one file shows "1 duplicate" in the
+  list, and its details list every file with a button to show it in its folder. A folder that only holds a
+  duplicate now shows the right family.
+
 ## 1.3.0
 
 ### List and tiles

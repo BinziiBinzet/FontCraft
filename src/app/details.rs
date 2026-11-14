@@ -70,6 +70,23 @@ impl FontCraftApp {
                 let styles = format!("{nfaces} style{}", if nfaces == 1 { "" } else { "s" });
                 let line = if src.is_empty() { styles } else { format!("{styles} · {src}") };
                 ui.label(RichText::new(line).color(p.weak).size(12.0));
+                // the same style in more than one file (for example imported as a duplicate): shown once in
+                // the list, all copies here
+                let files: Vec<PathBuf> = self.families[fi].files.iter().map(|x| self.faces[*x].meta.path.clone()).collect();
+                let dups = files.len().saturating_sub(nfaces);
+                if dups > 0 {
+                    let title = format!("{dups} duplicate file{} – {} files in all", if dups == 1 { "" } else { "s" }, files.len());
+                    egui::CollapsingHeader::new(RichText::new(title).size(12.0).color(p.accent)).id_salt(("dupfiles", fi)).show(ui, |ui| {
+                        for f in &files {
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Show").on_hover_text("Show the file in its folder").clicked() {
+                                    acts.push(Action::ShowInFolder(f.clone()));
+                                }
+                                ui.add(egui::Label::new(RichText::new(f.display().to_string()).size(11.5).color(p.weak)).truncate());
+                            });
+                        }
+                    });
+                }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if !system {

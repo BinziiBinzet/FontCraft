@@ -16,6 +16,8 @@ pub struct Item {
     pub info: String,
     pub path: PathBuf,
     pub index: u32,
+    /// the right-to-left script the font is made for ("Arabic"…), or empty
+    pub rtl: String,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -216,9 +218,37 @@ fn layout(spec: &Spec) -> Vec<Vec<Placed>> {
                 block.push((img, HAlign::Left, 3.0));
             }
         }
+        // a right-to-left font gets a sample in its own script (unless the text is right to left already)
+        let text = if !item.rtl.is_empty() && !spec.text.chars().any(crate::shape::is_rtl_char) {
+            crate::shape::rtl_sample(&item.rtl).unwrap_or(&spec.text).to_string()
+        } else {
+            spec.text.clone()
+        };
         match load(&item.path, item.index) {
+            // right-to-left and joined scripts are shaped; their lines start on the right
+            Some(_) if crate::shape::needs_shaping(&text) => {
+                let data = std::fs::read(&item.path).unwrap_or_default();
+                let align = if crate::shape::base_rtl(&text) {
+                    match spec.align {
+                        HAlign::Left => HAlign::Right,
+                        HAlign::Right => HAlign::Left,
+                        c => c,
+                    }
+                } else {
+                    spec.align
+                };
+                for line in crate::shape::wrap_lines(&data, item.index, &text, px, content_w * PX_PER_PT) {
+                    if let Some(pic) = crate::shape::render(&data, item.index, &line, px, None, crate::shape::HAlign::Left, 1) {
+                        let mut rgb = Vec::with_capacity(pic.w * pic.h * 3);
+                        for a in &pic.alpha {
+                            rgb.extend_from_slice(&mix(spec.bg, spec.fg, *a as f32 / 255.0));
+                        }
+                        block.push((Rgb { w: pic.w, h: pic.h, data: rgb }, align, 0.0));
+                    }
+                }
+            }
             Some(font) => {
-                for line in wrap(&font, px, &spec.text, content_w * PX_PER_PT) {
+                for line in wrap(&font, px, &text, content_w * PX_PER_PT) {
                     if let Some(img) = draw_line(&font, px, &line, spec.fg, spec.bg) {
                         block.push((img, spec.align, 0.0));
                     }
@@ -356,7 +386,14 @@ mod tests {
             return;
         }
         let items: Vec<Item> = (0..30)
-            .map(|i| Item { name: format!("Font {i}"), info: "TTF · 1 style".into(), path: fonts[i % fonts.len()].clone(), index: 0 })
+            .map(|i| Item {
+                name: format!("Font {i}"),
+                info: "TTF · 1 style".into(),
+                path: fonts[i % fonts.len()].clone(),
+                index: 0,
+                // every fifth one as an Arabic font: printed with the Arabic sample, shaped, from the right
+                rtl: if i % 5 == 4 { "Arabic".into() } else { String::new() },
+            })
             .collect();
         let spec = Spec {
             title: "Test collection".into(),

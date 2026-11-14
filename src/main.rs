@@ -12,6 +12,7 @@ mod netfs;
 mod online;
 mod pdfprint;
 mod remove;
+mod shape;
 mod sync;
 mod autoact;
 mod uifont;
