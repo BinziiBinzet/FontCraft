@@ -1081,11 +1081,16 @@ pub struct Cand {
     pub index: u32,
     pub family: String,
     pub style: String,
-    /// a Google Fonts letter set (not in the library)
+    /// a Google Fonts letter set (only the letters FontCraft compares, not a whole font)
     pub google: bool,
     /// id for drawing previews (the face id for library fonts)
     pub id: u64,
+    /// the free online source it comes from (None: the library or this computer)
+    pub provider: Option<crate::google::Provider>,
 }
+
+/// How many of the closest online families get all their styles compared, too.
+const STYLE_FAMILIES: usize = 30;
 
 pub struct JobInput {
     pub sample: Arc<Sample>,
@@ -1100,6 +1105,12 @@ pub struct JobInput {
     pub google_ready: Vec<Cand>,
     /// Google families to fetch first: (family name, request spec)
     pub google_missing: Vec<(String, String)>,
+    /// Fontshare families (their regular style is compared; the file is fetched once)
+    pub fontshare: Vec<crate::google::GFamily>,
+    /// Google and Fontshare families by name, to compare all styles of the closest ones
+    pub online_families: Vec<crate::google::GFamily>,
+    /// downloads are allowed
+    pub online: bool,
 }
 
 pub enum JobMsg {
@@ -1294,6 +1305,113 @@ fn run(input: JobInput, cancel: &AtomicBool, tx: &Sender<JobMsg>, ctx: &egui::Co
         done_base += batch.len();
         send(JobMsg::Results(top(&all)));
     }
+    // 4. Fontshare: the regular style of every family (fetched once, then kept)
+    if !input.fontshare.is_empty() {
+        send(JobMsg::Progress { done: done_base, total: total_all, what: "Comparing with Fontshare…".into() });
+        let cands: Vec<Cand> = std::thread::scope(|sc| {
+            let hs: Vec<_> = input
+                .fontshare
+                .chunks(input.fontshare.len().div_ceil(8).max(1))
+                .map(|part| {
+                    sc.spawn(move || {
+                        part.iter()
+                            .filter_map(|g| {
+                                let dest = crate::google::preview_path(&g.key());
+                                let path = if dest.exists() {
+                                    dest
+                                } else if input.online {
+                                    crate::online::fetch_preview(g, &dest).ok()?
+                                } else {
+                                    return None;
+                                };
+                                Some(Cand {
+                                    path,
+                                    index: 0,
+                                    family: g.name.clone(),
+                                    style: "Regular".into(),
+                                    google: false,
+                                    id: crate::activation::fnv(&format!("fontshare:{}", g.key())),
+                                    provider: Some(g.provider),
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        });
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let r = score_all(s, &units, &cands, cancel, &|_| {});
+        all.extend(r.into_iter().map(|(i, v)| (cands[i].clone(), v)));
+        send(JobMsg::Results(top(&all)));
+    }
+    // 5. all styles (light, bold, italic…) of the closest online families: lettering is often not
+    //    set in the regular style
+    let mut best_online: Vec<String> = vec![];
+    let mut sorted = all.clone();
+    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (c, _) in &sorted {
+        if c.provider.is_some() && !best_online.contains(&c.family) {
+            best_online.push(c.family.clone());
+        }
+        if best_online.len() >= STYLE_FAMILIES {
+            break;
+        }
+    }
+    let fams: Vec<&crate::google::GFamily> = best_online
+        .iter()
+        .filter_map(|n| input.online_families.iter().find(|g| g.name == *n && g.nstyles > 1))
+        .collect();
+    if fams.is_empty() {
+        return;
+    }
+    let total = fams.len();
+    send(JobMsg::Progress { done: 0, total, what: "Comparing all styles of the closest free fonts…".into() });
+    let done = AtomicUsize::new(0);
+    let cands: Vec<Cand> = std::thread::scope(|sc| {
+        let hs: Vec<_> = fams
+            .chunks(fams.len().div_ceil(6).max(1))
+            .map(|part| {
+                let done = &done;
+                sc.spawn(move || {
+                    let mut v = vec![];
+                    for g in part {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let (files, letter_set) = match g.provider {
+                            crate::google::Provider::Google => (crate::google::fetch_style_letter_sets(g, input.online), true),
+                            _ => (crate::online::fetch_style_files(g, input.online), false),
+                        };
+                        for (code, path) in files {
+                            v.push(Cand {
+                                path,
+                                index: 0,
+                                family: g.name.clone(),
+                                style: crate::google::GFamily::style_label(&code),
+                                google: letter_set,
+                                id: crate::activation::fnv(&format!("style:{}:{code}", g.key())),
+                                provider: Some(g.provider),
+                            });
+                        }
+                        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                        let _ = tx.send(JobMsg::Progress { done: n, total, what: "Comparing all styles of the closest free fonts…".into() });
+                        ctx.request_repaint();
+                    }
+                    v
+                })
+            })
+            .collect();
+        hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    });
+    if cancel.load(Ordering::Relaxed) || cands.is_empty() {
+        return;
+    }
+    let r = score_all(s, &units, &cands, cancel, &|_| {});
+    all.extend(r.into_iter().map(|(i, v)| (cands[i].clone(), v)));
+    send(JobMsg::Results(top(&all)));
 }
 
 // ------------------------------------------------------------------ tests
@@ -1359,7 +1477,7 @@ mod tests {
         assert_eq!(txt, "HamburgQuiz");
         let cands: Vec<Cand> = [&arial, &times, &georgia]
             .iter()
-            .map(|p| Cand { path: (*p).clone(), index: 0, family: p.display().to_string(), style: String::new(), google: false, id: 0 })
+            .map(|p| Cand { path: (*p).clone(), index: 0, family: p.display().to_string(), style: String::new(), google: false, id: 0, provider: None })
             .collect();
         let units = make_plan(&s, &read, &[], None);
         let mut r = score_all(&s, &units, &cands, &AtomicBool::new(false), &|_| {});
@@ -1444,13 +1562,98 @@ mod tests {
     /// Run with: cargo test --release whole_search -- --ignored --nocapture
     #[test]
     #[ignore]
+    /// Lettering set in a heavy style of a free online family is found with that family and style:
+    /// the regular styles bring the family close, then all its styles are fetched and compared.
+    /// (Needs the internet; run with `cargo test -- --ignored finds_other_styles`.)
+    fn finds_other_styles() {
+        let gcat = crate::google::load_catalog(true).expect("Google Fonts list");
+        let fs = crate::online::load_catalog(crate::google::Provider::Fontshare, true).unwrap_or_default();
+        // (family, style code, provider) to look for, each among a few similar families
+        let mut cases: Vec<(crate::google::GFamily, &str)> = vec![];
+        if let Some(g) = gcat.iter().find(|g| g.name == "Roboto Slab") {
+            cases.push((g.clone(), "800"));
+        }
+        if let Some(g) = fs.iter().find(|g| g.name == "Satoshi" || g.name == "General Sans") {
+            cases.push((g.clone(), "700"));
+        }
+        assert!(!cases.is_empty());
+        for (target, code) in cases {
+            // the target's heavy style, as a picture
+            let files = match target.provider {
+                crate::google::Provider::Google => crate::google::fetch_style_letter_sets(&target, true),
+                _ => crate::online::fetch_style_files(&target, true),
+            };
+            let (_, heavy) = files.iter().find(|(c, _)| c == code).expect("the heavy style").clone();
+            let img = picture(&heavy, "Handgloves", 90.0);
+            let s = Arc::new(analyze(&img, [0.0, 0.0, 1.0, 1.0]));
+            // its regular style and a few look-alikes as the first pass (Google letter sets / Fontshare)
+            let others: Vec<&str> = match target.provider {
+                crate::google::Provider::Google => vec!["Roboto Slab", "Zilla Slab", "Arvo", "Bitter", "Rokkitt"],
+                _ => vec![],
+            };
+            let mut ready = vec![];
+            let missing: Vec<(String, String)> = gcat
+                .iter()
+                .filter(|g| others.contains(&g.name.as_str()))
+                .map(|g| (g.name.clone(), crate::google::letter_spec(g)))
+                .collect();
+            for (n, p) in crate::google::fetch_letter_sets(&missing) {
+                ready.push(crate::google::letter_set_cand(&n, p));
+            }
+            for (n, _) in &missing {
+                let p = crate::google::letter_set_path(n);
+                if p.exists() && !ready.iter().any(|c: &Cand| c.family == *n) {
+                    ready.push(crate::google::letter_set_cand(n, p));
+                }
+            }
+            let fontshare = if target.provider == crate::google::Provider::Fontshare {
+                fs.iter().filter(|g| ["Satoshi", "General Sans", "Switzer", "Cabinet Grotesk", "Clash Grotesk"].contains(&g.name.as_str())).cloned().collect()
+            } else {
+                vec![]
+            };
+            let mut online_families = gcat.clone();
+            online_families.extend(fs.iter().cloned());
+            let input = JobInput {
+                sample: s.clone(),
+                letters: None,
+                skip: s.glyphs.iter().map(|g| g.wide).collect(),
+                typed: Some("Handgloves".into()),
+                local: vec![],
+                readers: vec![],
+                google_ready: ready,
+                google_missing: vec![],
+                fontshare,
+                online_families,
+                online: true,
+            };
+            let (tx, rx) = channel();
+            run(input, &AtomicBool::new(false), &tx, &egui::Context::default());
+            drop(tx);
+            let mut res = vec![];
+            for m in rx {
+                if let JobMsg::Results(r) = m {
+                    res = r;
+                }
+            }
+            let best = &res.first().expect("results").0;
+            println!("{} {code}: best {} {} ({:?})", target.name, best.family, best.style, best.provider);
+            for (c, v) in res.iter().take(5) {
+                println!("   {v:.3} {} {}", c.family, c.style);
+            }
+            assert_eq!(best.family, target.name);
+            assert_eq!(best.style, crate::google::GFamily::style_label(code), "the heavy style should beat the regular one");
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn whole_search() {
         let mut local = vec![];
         for d in crate::library::system_font_dirs() {
             for e in walkdir::WalkDir::new(d).into_iter().flatten() {
                 if crate::library::is_font_file(e.path()) {
                     for m in crate::library::parse_file(e.path()) {
-                        local.push(Cand { path: m.path.clone(), index: m.index, family: m.family.clone(), style: m.style.clone(), google: false, id: 0 });
+                        local.push(Cand { path: m.path.clone(), index: m.index, family: m.family.clone(), style: m.style.clone(), google: false, id: 0, provider: None });
                     }
                 }
             }
@@ -1471,7 +1674,7 @@ mod tests {
             let img = picture(&path, parts[1], parts[2].parse().unwrap());
             let mut local = local.clone();
             if !local.iter().any(|c| c.path == path) {
-                local.push(Cand { path: path.clone(), index: 0, family: "(the font itself)".into(), style: String::new(), google: true, id: 0 });
+                local.push(Cand { path: path.clone(), index: 0, family: "(the font itself)".into(), style: String::new(), google: true, id: 0, provider: None });
             }
             let s = Arc::new(analyze(&img, [0.0, 0.0, 1.0, 1.0]));
             let t = std::time::Instant::now();
@@ -1484,6 +1687,9 @@ mod tests {
                 readers: readers.clone(),
                 google_ready: vec![],
                 google_missing: vec![],
+                fontshare: vec![],
+                online_families: vec![],
+                online: false,
             };
             let (tx, rx) = channel();
             run(input, &AtomicBool::new(false), &tx, &egui::Context::default());

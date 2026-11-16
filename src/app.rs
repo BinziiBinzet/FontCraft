@@ -6,6 +6,7 @@ mod gview;
 mod import;
 mod list;
 mod misc;
+mod newfolder;
 mod playground;
 mod printing;
 mod removal;
@@ -142,6 +143,8 @@ enum Action {
     RenameFamily(Vec<usize>),
     /// open the "Delete fonts" window for these families
     Delete(Vec<usize>),
+    /// open the "New font folder" window (Some: inside this folder)
+    NewFolder(Option<PathBuf>),
     /// make a PDF of these families (title; true = ask where to save it, else open it to print)
     PrintPdf(Vec<usize>, String, bool),
     /// smart filters: new / edit / duplicate / delete
@@ -455,6 +458,12 @@ pub struct FontCraftApp {
     shaped: rtl::ShapedText,
     /// the interface font's file (for showing right-to-left text in the preview field)
     ui_font_file: Option<PathBuf>,
+    /// every folder inside the library folders (from the last scan), also empty ones
+    folder_dirs: Vec<PathBuf>,
+    /// the "New font folder" window: (name, where)
+    new_folder: Option<(String, String)>,
+    /// the + of the sidebar section drawn last (its menu opens below it)
+    plus_resp: Option<egui::Response>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -522,6 +531,9 @@ impl FontCraftApp {
             import_done: None,
             shaped: rtl::ShapedText::new(cc.egui_ctx.clone()),
             ui_font_file: crate::uifont::interface_font_file(),
+            folder_dirs: vec![],
+            new_folder: None,
+            plus_resp: None,
             google,
             gcat: vec![],
             gstates: [GState::Loading, GState::Loading, GState::Loading],
@@ -604,6 +616,21 @@ impl FontCraftApp {
                 app.show_settings = true;
                 app.settings_page = settings::Page::FontList;
             }
+            if s.contains("hideproviders") {
+                for p in Provider::ALL {
+                    app.cfg.hidden_providers.insert(p.tag().to_string());
+                }
+            }
+            if s.contains("hidefontshare") {
+                app.cfg.hidden_providers.insert(Provider::Fontshare.tag().to_string());
+            }
+            if s.contains("librarypage") {
+                app.show_settings = true;
+                app.settings_page = settings::Page::Library;
+            }
+            if s.contains("newfolder") {
+                app.new_folder_open(None);
+            }
             if s.contains("importpage") {
                 app.show_settings = true;
                 app.settings_page = settings::Page::Import;
@@ -660,6 +687,11 @@ impl FontCraftApp {
 
     fn p(&self) -> Pal {
         pal(self.cfg.theme)
+    }
+
+    /// Is this online source switched on (Settings › Library & folders)?
+    fn provider_shown(&self, p: Provider) -> bool {
+        !self.cfg.hidden_providers.contains(p.tag())
     }
 
     fn set_status(&mut self, s: impl Into<String>) {
@@ -778,11 +810,12 @@ impl FontCraftApp {
         while let Ok(m) = rx.try_recv() {
             match m {
                 ScanMsg::Progress { done, total } => self.scan_progress = (done, total),
-                ScanMsg::Done { faces, cache, offline, network } => done = Some((faces, cache, offline, network)),
+                ScanMsg::Done { faces, cache, offline, network, dirs } => done = Some((faces, cache, offline, network, dirs)),
             }
         }
-        if let Some((faces, cache, offline, network)) = done {
+        if let Some((faces, cache, offline, network, dirs)) = done {
             self.scan_rx = None;
+            self.folder_dirs = dirs;
             // Network folders that are away keep their active fonts; when they're back, the fonts
             // are switched on again.
             let offline: HashSet<PathBuf> = offline.into_iter().collect();
@@ -855,6 +888,13 @@ impl FontCraftApp {
                 if s.contains("arabicfolder") {
                     if let Some(n) = self.nodes.iter().find(|n| n.name == "Arabic") {
                         self.view = View::Folder(n.path.clone());
+                    }
+                }
+                if s.contains("dupfamily") {
+                    if let Some(fi) = self.families.iter().position(|f| f.name == "SchwartauDisplay07") {
+                        self.view = View::All;
+                        self.selected = [fi].into();
+                        self.primary = Some(fi);
                     }
                 }
                 if s.contains("rtltext") {
@@ -1050,6 +1090,8 @@ impl FontCraftApp {
         for (ri, root) in self.cfg.folders.clone().iter().enumerate() {
             let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
             dirs.insert(root.clone());
+            // every sub-folder, also those without fonts (they show 0)
+            dirs.extend(self.folder_dirs.iter().filter(|d| d.starts_with(root)).cloned());
             for f in self.faces.iter().filter(|f| f.folder == Some(ri)) {
                 let mut d = f.meta.path.parent();
                 while let Some(x) = d {
@@ -1617,7 +1659,10 @@ impl FontCraftApp {
                         self.faces.iter().filter(|f| f.folder == Some(i)).map(|f| f.path_key.clone()).collect();
                     self.set_paths(paths, false);
                     let name = self.cfg.folders[i].display().to_string();
-                    self.cfg.folders.remove(i);
+                    let gone = self.cfg.folders.remove(i);
+                    if self.cfg.standard_folder.as_ref() == Some(&gone) {
+                        self.cfg.standard_folder = None;
+                    }
                     self.view = View::All;
                     self.dirty = true;
                     self.set_status(format!("Removed {name} from FontCraft (the files were not deleted)"));
@@ -1658,6 +1703,7 @@ impl FontCraftApp {
                     self.set_status(format!("Copied “{s}”"));
                 }
                 Action::Delete(fams) => self.open_delete(fams),
+                Action::NewFolder(inside) => self.new_folder_open(inside),
                 Action::PrintPdf(fams, title, save) => self.print_pdf(fams, title, save),
                 Action::NewSmart => self.smart_new(),
                 Action::EditSmart(id) => self.smart_edit_open(id),
@@ -1708,7 +1754,10 @@ impl FontCraftApp {
                 if have.contains(&want) || fetched.len() >= 10 {
                     continue;
                 }
-                let best = (0..self.gcat.len()).filter(|i| ns(&self.gcat[*i].name) == want).min_by_key(|i| self.gcat[*i].provider.idx());
+                // only from the sources that are switched on
+                let best = (0..self.gcat.len())
+                    .filter(|i| ns(&self.gcat[*i].name) == want && self.provider_shown(self.gcat[*i].provider))
+                    .min_by_key(|i| self.gcat[*i].provider.idx());
                 if let Some(gi) = best {
                     let downloaded = Provider::ALL.iter().any(|p| !self.pfaces(*p, &self.gcat[gi].name).is_empty());
                     if !downloaded {
@@ -1989,20 +2038,22 @@ impl eframe::App for FontCraftApp {
         } else {
             self.sidebar_peek(ctx, &mut acts);
         }
-        if self.primary.is_none() && self.gsel.is_some() && matches!(self.view, View::Online(_) | View::Finder) {
-            self.google_details(ctx, &mut acts);
-        } else {
-            self.details(ctx, &mut acts);
-        }
-        if matches!(self.view, View::Online(_)) {
-            self.google_central(ctx, &mut acts);
-        } else if self.view == View::Finder {
-            self.finder_central(ctx, &mut acts);
-        } else {
-            self.central(ctx, &mut acts);
-        }
         if self.show_settings {
-            self.settings_window(ctx);
+            // settings take the place of the fonts (the details panel waits until they close)
+            self.settings_view(ctx);
+        } else {
+            if self.primary.is_none() && self.gsel.is_some() && matches!(self.view, View::Online(_) | View::Finder) {
+                self.google_details(ctx, &mut acts);
+            } else {
+                self.details(ctx, &mut acts);
+            }
+            if matches!(self.view, View::Online(_)) {
+                self.google_central(ctx, &mut acts);
+            } else if self.view == View::Finder {
+                self.finder_central(ctx, &mut acts);
+            } else {
+                self.central(ctx, &mut acts);
+            }
         }
         if self.family_rename.is_some() {
             self.family_rename_window(ctx);
@@ -2011,12 +2062,17 @@ impl eframe::App for FontCraftApp {
         self.poll_print();
         self.smart_window(ctx);
         self.import_ask_window(ctx);
+        self.new_folder_window(ctx);
         self.import_report_window(ctx);
         self.delete_window(ctx);
         self.delete_report_window(ctx);
         self.network_window(ctx);
         self.overlays(ctx);
         let changed_view = acts.iter().any(|a| matches!(a, Action::SetView(_)));
+        // choosing something in the sidebar (or a font) goes back from the settings to the fonts
+        if self.show_settings && acts.iter().any(|a| matches!(a, Action::SetView(_) | Action::Click(..))) {
+            self.show_settings = false;
+        }
         self.apply(acts);
         if changed_view {
             self.selected.clear();

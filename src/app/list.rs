@@ -363,6 +363,10 @@ impl FontCraftApp {
                         "No font matches this smart filter",
                         "Right-click the smart filter in the sidebar and choose “Edit…” to change its rules.",
                     ),
+                    View::Folder(_) => (
+                        "This folder has no fonts yet",
+                        "Copy font files (.ttf, .otf, .ttc, .otc) into it – they show up here within seconds.\nOther files in the folder are ignored.",
+                    ),
                     View::Favorites => ("No favorites yet", "Click the heart next to a font to add it here."),
                     View::Active => (
                         "No active fonts",
@@ -375,11 +379,24 @@ impl FontCraftApp {
             ui.label(RichText::new(title).size(18.0).strong().color(p.text));
             ui.label(RichText::new(sub).color(p.weak));
             ui.add_space(12.0);
-            if self.cfg.folders.is_empty() {
+            if let (View::Folder(dir), true) = (self.view.clone(), self.search.is_empty() && self.filter == Filter::All) {
                 ui.horizontal(|ui| {
-                    ui.add_space(ui.available_width() / 2.0 - 120.0);
+                    ui.add_space(ui.available_width() / 2.0 - 130.0);
+                    if ui.add(egui::Button::new(RichText::new("Open the folder").color(p.on_accent)).fill(p.accent)).clicked() {
+                        extras::open_file(&dir);
+                    }
+                    if ui.button("New subfolder…").clicked() {
+                        acts.push(Action::NewFolder(Some(dir.clone())));
+                    }
+                });
+            } else if self.cfg.folders.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.add_space(ui.available_width() / 2.0 - 170.0);
                     if ui.add(egui::Button::new(RichText::new("Add folder…").color(p.on_accent)).fill(p.accent)).clicked() {
                         acts.push(Action::AddFolderDialog);
+                    }
+                    if ui.button("New font folder…").clicked() {
+                        acts.push(Action::NewFolder(None));
                     }
                     if ui.button("Import fonts…").clicked() {
                         acts.push(Action::ImportDialog);

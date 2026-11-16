@@ -156,7 +156,26 @@ fn base_family(p: Provider, name: String, slug: String, kind: String) -> GFamily
         preview_src: String::new(),
         license: String::new(),
         rtl: String::new(),
+        style_files: vec![],
     }
+}
+
+/// Fontshare: the files of all other styles of a family (for the Font finder), fetched once and
+/// then kept in FontCraft's folder. Offline only the ones already there.
+pub fn fetch_style_files(g: &GFamily, online: bool) -> Vec<(String, PathBuf)> {
+    let dir = root(g.provider).join("letters");
+    let mut out = vec![];
+    for (code, url) in g.styles.iter().zip(&g.style_files) {
+        if code == "400" || url.is_empty() {
+            continue;
+        }
+        let safe: String = format!("{}-{code}", g.slug).chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' }).collect();
+        let path = dir.join(format!("{safe}.ttf"));
+        if path.exists() || (online && fetch(url, &path).is_ok()) {
+            out.push((code.clone(), path));
+        }
+    }
+    out
 }
 
 fn parse_fontshare(text: &str) -> Vec<GFamily> {
@@ -207,6 +226,10 @@ fn parse_fontshare(text: &str) -> Vec<GFamily> {
                 .collect();
             g.nstyles = statics.len().max(1);
             g.italic = statics.iter().any(|s| s.1);
+            g.style_files = statics
+                .iter()
+                .map(|(_, _, _, f)| if f.is_empty() { String::new() } else { format!("{}{f}.ttf", if f.starts_with("//") { "https:" } else { "" }) })
+                .collect();
             // the regular style (or the one closest to it) for previews
             let pick = statics.iter().min_by_key(|(w, i, _, _)| (*i, (*w as i32 - 400).abs()));
             g.preview_src = pick
@@ -541,6 +564,7 @@ mod tests {
             preview_src: "FCTestSquirrel-Regular.otf".into(),
             license: String::new(),
             rtl: String::new(),
+            style_files: vec![],
         };
         let since = SystemTime::now();
         let mut tried = std::collections::HashMap::new();

@@ -196,6 +196,10 @@ pub struct Config {
     pub sidebar_w: f32,
     pub details_w: f32,
     pub smart_filters: Vec<SmartFilter>,
+    /// the person's main font folder (marked with a star); new folders can be made inside it
+    pub standard_folder: Option<PathBuf>,
+    /// online sources the person switched off ("google", "fontshare", "fontsquirrel")
+    pub hidden_providers: BTreeSet<String>,
     // importing
     pub import_activate: bool,
     pub import_report: bool,
@@ -247,6 +251,8 @@ impl Default for Config {
             sidebar_w: 200.0,
             details_w: 420.0,
             smart_filters: vec![],
+            standard_folder: None,
+            hidden_providers: BTreeSet::new(),
             import_activate: false,
             import_report: true,
             import_collection: false,

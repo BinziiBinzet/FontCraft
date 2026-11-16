@@ -211,6 +211,12 @@ pub enum Origin {
 
 pub const FONT_EXTS: &[&str] = &["ttf", "otf", "ttc", "otc"];
 
+/// Folders that aren't shown: hidden ones (".git", ".Trash") and the Mac's leftovers in zip files.
+fn is_hidden_dir(e: &walkdir::DirEntry) -> bool {
+    let n = e.file_name().to_string_lossy();
+    e.file_type().is_dir() && (n.starts_with('.') || n == "__MACOSX")
+}
+
 pub fn is_font_file(p: &Path) -> bool {
     p.extension()
         .map(|e| FONT_EXTS.contains(&e.to_string_lossy().to_ascii_lowercase().as_str()))
@@ -387,7 +393,8 @@ pub enum ScanMsg {
     Progress { done: usize, total: usize },
     /// `offline`: library folders that could not be reached (a network share that is away)
     /// `network`: library folders that live on another computer
-    Done { faces: Vec<(FaceMeta, Origin)>, cache: ScanCache, offline: Vec<PathBuf>, network: Vec<PathBuf> },
+    /// `dirs`: every folder inside the library folders (also those without fonts)
+    Done { faces: Vec<(FaceMeta, Origin)>, cache: ScanCache, offline: Vec<PathBuf>, network: Vec<PathBuf>, dirs: Vec<PathBuf> },
 }
 
 pub fn system_font_dirs() -> Vec<PathBuf> {
@@ -445,6 +452,7 @@ pub fn spawn_scan(folders: Vec<PathBuf>, cache: ScanCache, ctx: egui::Context) -
         }
         let mut offline = vec![];
         let mut network = vec![];
+        let mut dirs = vec![];
         for dir in &folders {
             let net = crate::netfs::is_network_path(dir);
             if net {
@@ -459,8 +467,16 @@ pub fn spawn_scan(folders: Vec<PathBuf>, cache: ScanCache, ctx: egui::Context) -
                 offline.push(dir.clone());
                 continue;
             }
-            for e in walkdir::WalkDir::new(dir).follow_links(true).into_iter().filter_map(|e| e.ok()) {
+            // hidden folders (".git", "__MACOSX"…) are left out
+            let walk = walkdir::WalkDir::new(dir).follow_links(true).into_iter().filter_entry(|e| e.depth() == 0 || !is_hidden_dir(e));
+            for e in walk.filter_map(|e| e.ok()) {
                 let p = e.path();
+                // every sub-folder shows in the folder tree, also one without fonts (with 0)
+                if e.file_type().is_dir() {
+                    dirs.push(p.to_path_buf());
+                    continue;
+                }
+                // only font files count; other files in the folder are ignored
                 if e.file_type().is_file() && is_font_file(p) && seen.insert(p.to_path_buf()) {
                     files.push((p.to_path_buf(), Origin::Folder(dir.clone())));
                 }
@@ -498,7 +514,7 @@ pub fn spawn_scan(folders: Vec<PathBuf>, cache: ScanCache, ctx: egui::Context) -
                 new_cache.entry(k).or_insert(v);
             }
         }
-        let _ = tx.send(ScanMsg::Done { faces, cache: new_cache, offline, network });
+        let _ = tx.send(ScanMsg::Done { faces, cache: new_cache, offline, network, dirs });
         ctx.request_repaint();
     });
     rx
@@ -754,6 +770,31 @@ pub fn unicode_block(c: char) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A font folder's sub-folders are all listed, also empty ones; hidden folders are not, and
+    /// files that aren't fonts are ignored.
+    #[test]
+    fn lists_empty_folders_and_ignores_other_files() {
+        let d = std::env::temp_dir().join("fontcraft-folders-test");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("Empty")).unwrap();
+        std::fs::create_dir_all(d.join("With notes").join("Deeper")).unwrap();
+        std::fs::create_dir_all(d.join(".hidden")).unwrap();
+        std::fs::write(d.join("With notes").join("readme.txt"), b"not a font").unwrap();
+        std::fs::write(d.join("With notes").join("picture.png"), b"not a font").unwrap();
+        let rx = spawn_scan(vec![d.clone()], crate::config::load_cache(), egui::Context::default());
+        let (faces, dirs) = loop {
+            match rx.recv().unwrap() {
+                ScanMsg::Done { faces, dirs, .. } => break (faces, dirs),
+                ScanMsg::Progress { .. } => {}
+            }
+        };
+        assert!(dirs.contains(&d.join("Empty")), "{dirs:?}");
+        assert!(dirs.contains(&d.join("With notes").join("Deeper")));
+        assert!(!dirs.iter().any(|x| x.ends_with(".hidden")));
+        assert!(!faces.iter().any(|(_, o)| matches!(o, Origin::Folder(_))), "no font files in there");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn measures_shapes_of_installed_fonts() {

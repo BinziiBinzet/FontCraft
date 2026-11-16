@@ -97,10 +97,13 @@ impl FontCraftApp {
         if let Some(tip) = plus {
             let pr = Rect::from_center_size(pos2(rect.right() - 12.0, rect.center().y), vec2(20.0, 20.0));
             let pres = ui.interact(pr, Id::new(("plus", key)), Sense::click());
-            if resp.hovered() || pres.hovered() {
-                paint_icon(ui.painter(), pr, Icon::Plus, if pres.hovered() { p.accent } else { p.weak }, p.side);
+            let menu_open = ui.memory(|m| m.is_popup_open(Id::new(("plusmenu", key))));
+            if resp.hovered() || pres.hovered() || menu_open {
+                paint_icon(ui.painter(), pr, Icon::Plus, if pres.hovered() || menu_open { p.accent } else { p.weak }, p.side);
             }
-            plus_clicked = pres.on_hover_text(tip).clicked();
+            let pres = pres.on_hover_text(tip);
+            plus_clicked = pres.clicked();
+            self.plus_resp = Some(pres);
         }
         if resp.clicked() && !plus_clicked {
             if open {
@@ -314,9 +317,12 @@ impl FontCraftApp {
                     self.sidebar_collections(ui, &p, acts);
                     self.sidebar_smart(ui, &p, acts);
                     self.sidebar_tags(ui, &p, acts);
-                    let (open, _) = self.section_header(ui, "sec:providers", "PROVIDERS", None);
+                    // the online sources the person hasn't switched off (Settings › Library & folders);
+                    // with all three off, the whole section goes
+                    let shown: Vec<Provider> = Provider::ALL.into_iter().filter(|p| self.provider_shown(*p)).collect();
+                    let open = !shown.is_empty() && self.section_header(ui, "sec:providers", "PROVIDERS", None).0;
                     if open {
-                        for prov in Provider::ALL {
+                        for prov in shown {
                             let prefix = format!("{}/", prov.tag());
                             let all: Vec<usize> = self.gdl.iter().filter(|(k, _)| k.starts_with(&prefix)).flat_map(|(_, v)| v.iter().copied()).collect();
                             let state = if all.is_empty() { (0, 1) } else { self.faces_state(&all) };
@@ -569,9 +575,41 @@ impl FontCraftApp {
     }
 
     fn sidebar_folders(&mut self, ui: &mut Ui, p: &Pal, acts: &mut Vec<Action>) {
+        self.plus_resp = None;
         let (open, plus) = self.section_header(ui, "sec:folders", "FOLDERS", Some("Add a font folder"));
+        // the + opens a small menu with the three ways to add a folder
+        let menu = Id::new(("plusmenu", "sec:folders"));
         if plus {
-            acts.push(Action::AddFolderDialog);
+            ui.memory_mut(|m| m.toggle_popup(menu));
+        }
+        // (for a picture of the menu in a check)
+        if self.shot.is_some() && std::env::var("FONTCRAFT_SHOW").map(|s| s.contains("plusmenu")).unwrap_or(false) {
+            ui.memory_mut(|m| m.open_popup(menu));
+        }
+        if let Some(pr) = self.plus_resp.clone() {
+            let standard = self.cfg.standard_folder.clone().filter(|s| self.cfg.folders.contains(s));
+            egui::popup_below_widget(ui, menu, &pr, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                ui.set_min_width(290.0);
+                let std_name = standard.as_ref().and_then(|s| s.file_name()).map(|n| n.to_string_lossy().to_string());
+                let label = match &std_name {
+                    Some(n) => format!("★  New folder in “{n}”…"),
+                    None => "★  New folder in your standard folder…".to_string(),
+                };
+                let tip = if standard.is_some() {
+                    "A new folder inside your standard font folder"
+                } else {
+                    "Mark one of your folders as standard first: right-click it, or Settings › Library & folders"
+                };
+                if ui.add_enabled(standard.is_some(), egui::Button::new(label)).on_disabled_hover_text(tip).on_hover_text(tip).clicked() {
+                    acts.push(Action::NewFolder(standard.clone()));
+                }
+                if ui.button("New folder anywhere…").on_hover_text("Make a new folder wherever you like (or add an existing one)").clicked() {
+                    acts.push(Action::NewFolder(None));
+                }
+                if ui.button("Network folder…").on_hover_text("A shared folder on a server, a NAS or another computer").clicked() {
+                    acts.push(Action::NetworkFolderDialog);
+                }
+            });
         }
         if !open {
             return;
@@ -596,6 +634,10 @@ impl FontCraftApp {
                 name.push_str("  · offline");
             } else if net {
                 name.push_str("  · network");
+            }
+            let standard = depth == 0 && self.cfg.standard_folder.as_ref() == Some(&path);
+            if standard {
+                name = format!("★ {name}");
             }
             let (r, d, a) = Self::side_item(
                 ui,
@@ -626,6 +668,8 @@ impl FontCraftApp {
                 format!("{}\nCan't be reached right now. Its active fonts come back when it's online again.", path.display())
             } else if net {
                 format!("Network folder: {}", path.display())
+            } else if standard {
+                format!("{}\nYour standard font folder", path.display())
             } else {
                 path.display().to_string()
             };
@@ -640,6 +684,10 @@ impl FontCraftApp {
                     ui.close_menu();
                 }
                 ui.separator();
+                if ui.button("New subfolder…").on_hover_text("Make a new folder inside this one").clicked() {
+                    acts.push(Action::NewFolder(Some(path.clone())));
+                    ui.close_menu();
+                }
                 if ui.button("Rescan").clicked() {
                     acts.push(Action::Rescan);
                     ui.close_menu();
@@ -650,26 +698,18 @@ impl FontCraftApp {
                 }
                 if depth == 0 {
                     ui.separator();
+                    let label = if standard { "★ Your standard folder (click to unmark)" } else { "☆ Make this my standard folder" };
+                    if ui.button(label).on_hover_text("New folders can be made inside it from the + next to Folders").clicked() {
+                        self.cfg.standard_folder = if standard { None } else { Some(path.clone()) };
+                        self.dirty = true;
+                        ui.close_menu();
+                    }
                     if ui.button("Remove folder from FontCraft").on_hover_text("The font files stay on your disk").clicked() {
                         acts.push(Action::RemoveFolder(root));
                         ui.close_menu();
                     }
                 }
             });
-        }
-        // network folders: a share on a server, NAS or another computer
-        ui.add_space(2.0);
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::click());
-        let col = if resp.hovered() { p.accent } else { p.weak };
-        ui.painter().text(
-            pos2(rect.left() + 26.0, rect.center().y),
-            Align2::LEFT_CENTER,
-            "+ Add a network folder…",
-            FontId::proportional(12.0),
-            col,
-        );
-        if resp.on_hover_text("A shared folder on a server, a NAS or another computer").clicked() {
-            acts.push(Action::NetworkFolderDialog);
         }
     }
 }

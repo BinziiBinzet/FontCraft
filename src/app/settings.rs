@@ -73,28 +73,28 @@ impl Page {
 }
 
 impl FontCraftApp {
-    pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
+    /// Settings, shown in the main area of the window (where the fonts are otherwise): the list of
+    /// sections on the left, the chosen section on the right.
+    pub(super) fn settings_view(&mut self, ctx: &egui::Context) {
         let p = self.p();
-        let mut open = self.show_settings;
         let mut acts: Vec<Action> = vec![];
-        let screen = ctx.screen_rect();
-        let w = (screen.width() - 80.0).clamp(560.0, 940.0);
-        let h = (screen.height() - 120.0).clamp(360.0, 660.0);
-        let nav_w = 210.0;
-        egui::Window::new(RichText::new("Settings").strong())
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
-            .fixed_size(vec2(w, h))
-            .frame(egui::Frame::window(&ctx.style()).inner_margin(egui::Margin::same(0)))
-            .show(ctx, |ui| {
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        let mut close = false;
+        let nav_w = 220.0;
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.content)).show(ctx, |ui| {
+            let full = ui.max_rect();
+            let (w, h) = (full.width(), full.height());
+            {
+                {
+                    // Esc goes back to the fonts (unless a text field is being typed in)
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) && !ui.ctx().memory(|m| m.focused().is_some()) {
+                        close = true;
+                    }
                     // the list of sections
-                    let (nav, _) = ui.allocate_exact_size(vec2(nav_w, h), Sense::hover());
-                    ui.painter().rect_filled(nav, CornerRadius { nw: 0, ne: 0, sw: 10, se: 0 }, p.side);
-                    let mut y = nav.top() + 10.0;
+                    let nav = Rect::from_min_size(full.min, vec2(nav_w, h));
+                    ui.painter().rect_filled(nav, CornerRadius::ZERO, p.side);
+                    ui.painter().vline(nav.right(), nav.y_range(), Stroke::new(1.0_f32, p.line));
+                    ui.painter().text(pos2(nav.left() + 18.0, nav.top() + 26.0), Align2::LEFT_CENTER, "Settings", FontId::proportional(18.0), p.text);
+                    let mut y = nav.top() + 52.0;
                     for page in Page::ALL {
                         let r = Rect::from_min_size(pos2(nav.left() + 8.0, y), vec2(nav_w - 16.0, 34.0));
                         let resp = ui.interact(r, egui::Id::new(("settings-page", page as u8)), Sense::click());
@@ -116,15 +116,27 @@ impl FontCraftApp {
                         }
                         y += 38.0;
                     }
-                    // the chosen section
-                    ui.vertical(|ui| {
-                        ui.set_width(w - nav_w);
-                        ui.set_height(h);
+                    // back to the fonts
+                    let back = Rect::from_min_size(pos2(nav.left() + 8.0, nav.bottom() - 46.0), vec2(nav_w - 16.0, 34.0));
+                    let bresp = ui.interact(back, egui::Id::new("settings-back"), Sense::click());
+                    if bresp.hovered() {
+                        ui.painter().rect_filled(back, CornerRadius::same(6), p.hover);
+                    }
+                    ui.painter().text(pos2(back.left() + 12.0, back.center().y), Align2::LEFT_CENTER, "‹  Back to the fonts", FontId::proportional(13.5), p.weak);
+                    if bresp.on_hover_text("Or press Esc").clicked() {
+                        close = true;
+                    }
+                    // the chosen section, as wide as reads well
+                    let content = Rect::from_min_max(pos2(nav.right() + 1.0, full.top()), full.max);
+                    let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(content).layout(egui::Layout::top_down(egui::Align::Min)));
+                    let text_w = (w - nav_w - 60.0).clamp(300.0, 860.0);
+                    {
+                        let ui = &mut cui;
                         egui::ScrollArea::vertical().id_salt(("settings-scroll", self.settings_page as u8)).auto_shrink([false, false]).show(ui, |ui| {
-                            egui::Frame::new().inner_margin(egui::Margin { left: 26, right: 26, top: 16, bottom: 20 }).show(ui, |ui| {
-                                ui.set_width(w - nav_w - 52.0);
+                            egui::Frame::new().inner_margin(egui::Margin { left: 30, right: 30, top: 20, bottom: 24 }).show(ui, |ui| {
+                                ui.set_width(text_w);
                                 ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
-                                ui.label(RichText::new(self.settings_page.title()).size(22.0).color(p.text));
+                                ui.label(RichText::new(self.settings_page.title()).size(24.0).color(p.text));
                                 ui.add_space(4.0);
                                 match self.settings_page {
                                     Page::Appearance => self.settings_appearance(ui, &p),
@@ -140,10 +152,14 @@ impl FontCraftApp {
                                 }
                             });
                         });
-                    });
-                });
-            });
-        self.show_settings = open;
+                    }
+                    let _ = h;
+                }
+            }
+        });
+        if close {
+            self.show_settings = false;
+        }
         self.apply(acts);
     }
 
@@ -261,9 +277,29 @@ impl FontCraftApp {
     fn settings_library(&mut self, ui: &mut Ui, p: &Pal, acts: &mut Vec<Action>) {
         heading(ui, p, "FOLDERS");
         note(ui, p, "FontCraft shows the fonts in the folders you add and watches them: fonts you copy in appear within seconds.");
+        note(
+            ui,
+            p,
+            "Click the star to mark your standard font folder – your main one. The + next to Folders can then make new \
+             folders right inside it.",
+        );
+        let mut set_standard: Option<Option<PathBuf>> = None;
         for f in &self.cfg.folders {
-            let tag = if self.is_net_folder(f) { "  · network" } else { "" };
-            ui.add(egui::Label::new(RichText::new(format!("{}{tag}", f.display())).size(12.0)).truncate());
+            let standard = self.cfg.standard_folder.as_ref() == Some(f);
+            ui.horizontal(|ui| {
+                let star = RichText::new(if standard { "★" } else { "☆" }).size(16.0).color(if standard { p.accent } else { p.weak });
+                let tip = if standard { "Your standard font folder – click to unmark" } else { "Make this your standard font folder" };
+                if ui.add(egui::Button::new(star).frame(false)).on_hover_text(tip).clicked() {
+                    set_standard = Some(if standard { None } else { Some(f.clone()) });
+                }
+                let tag = if self.is_net_folder(f) { "  · network" } else { "" };
+                let text = RichText::new(format!("{}{tag}", f.display())).size(12.0);
+                ui.add(egui::Label::new(if standard { text.strong() } else { text }).truncate());
+            });
+        }
+        if let Some(s) = set_standard {
+            self.cfg.standard_folder = s;
+            self.dirty = true;
         }
         ui.horizontal(|ui| {
             if ui.button("Add a folder…").on_hover_text(shortcuts::label(shortcuts::Cmd::AddFolder)).clicked() {
@@ -277,6 +313,29 @@ impl FontCraftApp {
             }
         });
         note(ui, p, "To take a folder out of FontCraft, right-click it in the sidebar. Its files stay on your disk.");
+        heading(ui, p, "ONLINE FONT SOURCES");
+        note(
+            ui,
+            p,
+            "Switch off the free online sources you don't use. They disappear from the sidebar (with all three off, the \
+             whole Providers section goes), and the Font finder and auto-activation don't use them. Fonts you already got \
+             from them stay in your library.",
+        );
+        for prov in Provider::ALL {
+            let mut on = self.provider_shown(prov);
+            if ui.checkbox(&mut on, format!("Show {}", prov.label())).on_hover_text(prov.about()).changed() {
+                if on {
+                    self.cfg.hidden_providers.remove(prov.tag());
+                } else {
+                    self.cfg.hidden_providers.insert(prov.tag().to_string());
+                    if self.view == View::Online(prov) {
+                        self.view = View::All;
+                        self.gsel = None;
+                    }
+                }
+                self.dirty = true;
+            }
+        }
         heading(ui, p, "IMPORT FOLDER");
         note(ui, p, "Fonts you import (or drop onto the window) are copied here. Folders you add stay where they are.");
         ui.horizontal(|ui| {

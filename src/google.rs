@@ -112,6 +112,8 @@ pub struct GFamily {
     pub license: String,
     /// The right-to-left script the family is made for ("Arabic", "Hebrew"…), or empty.
     pub rtl: String,
+    /// Fontshare: the file of each style (same order as `styles`)
+    pub style_files: Vec<String>,
 }
 
 impl GFamily {
@@ -274,6 +276,7 @@ pub fn parse_catalog(text: &str) -> Vec<GFamily> {
                     .and_then(crate::shape::rtl_script_name)
                     .unwrap_or("")
                     .to_string(),
+                style_files: vec![],
                 thickness: rating("thickness"),
                 width: rating("width"),
                 lower: name.to_lowercase(),
@@ -430,7 +433,77 @@ pub fn letter_set_cand(name: &str, path: PathBuf) -> crate::fontmatch::Cand {
         style: String::new(),
         google: true,
         id: crate::activation::fnv(&format!("gletters:{name}")),
+        provider: Some(Provider::Google),
     }
+}
+
+/// The letter set of one style of a family ("700", "400i"…).
+fn style_letters_path(name: &str, code: &str) -> PathBuf {
+    root().join("letters").join(format!("{}@{code}.ttf", safe(name)))
+}
+fn style_letters_none(name: &str) -> PathBuf {
+    root().join("letters").join(format!("{}@styles.none", safe(name)))
+}
+
+/// The letter sets of all other styles of a family (the regular one is compared first), fetched
+/// once in a single request and then kept. Offline only the ones already on disk.
+pub fn fetch_style_letter_sets(g: &GFamily, online: bool) -> Vec<(String, PathBuf)> {
+    let codes: Vec<String> = g.styles.iter().filter(|c| c.as_str() != "400").cloned().collect();
+    let have = |codes: &[String]| -> Vec<(String, PathBuf)> {
+        codes.iter().map(|c| (c.clone(), style_letters_path(&g.name, c))).filter(|(_, p)| p.exists()).collect()
+    };
+    let got = have(&codes);
+    if got.len() == codes.len() || !online || style_letters_none(&g.name).exists() {
+        return got;
+    }
+    // Google wants the styles sorted: upright before italic, light to heavy
+    let mut tuples: Vec<(u8, u16)> = g
+        .styles
+        .iter()
+        .map(|c| (c.ends_with('i') as u8, c.trim_end_matches('i').parse::<u16>().unwrap_or(400)))
+        .collect();
+    tuples.sort();
+    tuples.dedup();
+    let base = g.name.replace(' ', "+");
+    let spec = if tuples.iter().any(|t| t.0 == 1) {
+        format!("{base}:ital,wght@{}", tuples.iter().map(|(i, w)| format!("{i},{w}")).collect::<Vec<_>>().join(";"))
+    } else {
+        format!("{base}:wght@{}", tuples.iter().map(|(_, w)| w.to_string()).collect::<Vec<_>>().join(";"))
+    };
+    let url = format!("https://fonts.googleapis.com/css2?family={spec}&text={}", percent(&format!("{} .", crate::fontmatch::CHARSET)));
+    let Ok(css) = get_text(&url) else {
+        let _ = std::fs::write(style_letters_none(&g.name), b"");
+        return got;
+    };
+    let dir = root().join("letters");
+    let _ = std::fs::create_dir_all(&dir);
+    let mut cmd = curl();
+    cmd.args(["-sSL", "--fail", "--max-time", "120", "-Z", "--parallel-max", "8"]);
+    let mut want = vec![];
+    for block in css.split("@font-face").skip(1) {
+        let field = |k: &str| block.split(k).nth(1).and_then(|s| s.split(';').next()).map(|s| s.trim().to_string());
+        let italic = field("font-style:").map(|s| s == "italic").unwrap_or(false);
+        let weight = field("font-weight:").and_then(|s| s.split_whitespace().next().map(String::from)).unwrap_or_else(|| "400".into());
+        let code = format!("{weight}{}", if italic { "i" } else { "" });
+        let Some(u) = block.split("url(").nth(1).and_then(|s| s.split(')').next()) else { continue };
+        if code == "400" || !codes.contains(&code) || style_letters_path(&g.name, &code).exists() || want.contains(&code) {
+            continue;
+        }
+        cmd.arg("-o").arg(style_letters_path(&g.name, &code).with_extension("part")).arg(u);
+        want.push(code);
+    }
+    if !want.is_empty() {
+        let _ = cmd.output();
+    }
+    for code in want {
+        let p = style_letters_path(&g.name, &code);
+        let tmp = p.with_extension("part");
+        let ok = std::fs::read(&tmp).map(|d| ttf_parser::Face::parse(&d, 0).is_ok()).unwrap_or(false);
+        if !(ok && std::fs::rename(&tmp, &p).is_ok()) {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+    have(&codes)
 }
 
 fn percent(s: &str) -> String {

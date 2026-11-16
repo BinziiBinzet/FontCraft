@@ -245,6 +245,10 @@ impl FontCraftApp {
             acts.push(Action::AddFolderDialog);
             ui.close_menu();
         }
+        if ui.button("New font folder…").on_hover_text("Make a new folder on your disk that is a font folder right away").clicked() {
+            acts.push(Action::NewFolder(None));
+            ui.close_menu();
+        }
         if ui.button("Add network folder…").on_hover_text("A shared folder on a server, a NAS or another computer").clicked() {
             acts.push(Action::NetworkFolderDialog);
             ui.close_menu();

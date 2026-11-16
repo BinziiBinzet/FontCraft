@@ -71,19 +71,28 @@ impl FontCraftApp {
                 let line = if src.is_empty() { styles } else { format!("{styles} · {src}") };
                 ui.label(RichText::new(line).color(p.weak).size(12.0));
                 // the same style in more than one file (for example imported as a duplicate): shown once in
-                // the list, all copies here
-                let files: Vec<PathBuf> = self.families[fi].files.iter().map(|x| self.faces[*x].meta.path.clone()).collect();
-                let dups = files.len().saturating_sub(nfaces);
+                // the list; here every such style with its files – the first is the original, the others
+                // are marked as duplicates. Other styles of the family are not duplicates and aren't listed.
+                let groups = self.duplicate_groups(fi);
+                let dups: usize = groups.iter().map(|(_, files)| files.len() - 1).sum();
                 if dups > 0 {
-                    let title = format!("{dups} duplicate file{} – {} files in all", if dups == 1 { "" } else { "s" }, files.len());
-                    egui::CollapsingHeader::new(RichText::new(title).size(12.0).color(p.accent)).id_salt(("dupfiles", fi)).show(ui, |ui| {
-                        for f in &files {
-                            ui.horizontal(|ui| {
-                                if ui.small_button("Show").on_hover_text("Show the file in its folder").clicked() {
-                                    acts.push(Action::ShowInFolder(f.clone()));
-                                }
-                                ui.add(egui::Label::new(RichText::new(f.display().to_string()).size(11.5).color(p.weak)).truncate());
-                            });
+                    let title = format!("{dups} duplicate file{}", if dups == 1 { "" } else { "s" });
+                    egui::CollapsingHeader::new(RichText::new(title).size(12.0).color(p.accent))
+                        .id_salt(("dupfiles", fi))
+                        .default_open(self.shot.is_some())
+                        .show(ui, |ui| {
+                        for (style, files) in &groups {
+                            ui.label(RichText::new(style).size(12.0).strong().color(p.text));
+                            for (k, f) in files.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("Show").on_hover_text("Show the file in its folder").clicked() {
+                                        acts.push(Action::ShowInFolder(f.clone()));
+                                    }
+                                    let (tag, col) = if k == 0 { ("original", p.weak) } else { ("duplicate", p.accent) };
+                                    ui.label(RichText::new(tag).size(11.0).color(col));
+                                    ui.add(egui::Label::new(RichText::new(f.display().to_string()).size(11.5).color(p.weak)).truncate());
+                                });
+                            }
                         }
                     });
                 }
@@ -180,6 +189,35 @@ impl FontCraftApp {
             self.primary = None;
             self.selected.clear();
         }
+    }
+
+    /// The styles of a family that are in more than one file: (style, files). The same style counts
+    /// as a duplicate when name, size and version are the same (as when the list shows it once). The
+    /// original comes first: a file outside FontCraft's import folder, else the one added first.
+    pub(super) fn duplicate_groups(&self, fi: usize) -> Vec<(String, Vec<PathBuf>)> {
+        let import = self.cfg.import_dir();
+        let mut groups: Vec<((String, u64, String), Vec<PathBuf>)> = vec![];
+        for x in &self.families[fi].files {
+            let m = &self.faces[*x].meta;
+            let key = (m.style.clone(), m.file_size, m.version.clone());
+            match groups.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, v)) => {
+                    if !v.contains(&m.path) {
+                        v.push(m.path.clone());
+                    }
+                }
+                None => groups.push((key, vec![m.path.clone()])),
+            }
+        }
+        groups
+            .into_iter()
+            .filter(|(_, v)| v.len() > 1)
+            .map(|((style, _, _), mut v)| {
+                let added = |p: &PathBuf| self.cfg.added.get(&p.to_string_lossy().to_string()).copied().unwrap_or(0);
+                v.sort_by_key(|p| (p.starts_with(&import), added(p)));
+                (style, v)
+            })
+            .collect()
     }
 
     pub(super) fn face_picker(&mut self, ui: &mut Ui, fi: usize, only_variable: bool) -> usize {

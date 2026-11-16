@@ -257,6 +257,7 @@ impl FontCraftApp {
                 style: f.meta.style.clone(),
                 google: false,
                 id: f.id,
+                provider: None,
             })
             .collect();
         local.sort_by(|a, b| a.path.cmp(&b.path).then(a.index.cmp(&b.index)));
@@ -293,7 +294,7 @@ impl FontCraftApp {
         }
         // Google Fonts letter sets
         let (mut gready, mut gmissing) = (vec![], vec![]);
-        if !self.finder.skip_google && self.gstates[0] == GState::Ready {
+        if !self.finder.skip_google && self.gstates[0] == GState::Ready && self.provider_shown(Provider::Google) {
             let online = self.shot.is_none();
             for g in self.gcat.iter().filter(|g| g.provider == Provider::Google) {
                 // emoji and icon families have no letters to compare (and are huge)
@@ -311,6 +312,27 @@ impl FontCraftApp {
             let pop: HashMap<&str, u32> = self.gcat.iter().filter(|g| g.provider == Provider::Google).map(|g| (g.name.as_str(), g.popularity)).collect();
             gmissing.sort_by_key(|(n, _)| pop.get(n.as_str()).copied().unwrap_or(u32::MAX));
         }
+        // Fontshare (its regular styles first), and the online families whose other styles are
+        // compared when they come close
+        let use_online = !self.finder.skip_google;
+        let fontshare: Vec<google::GFamily> = if use_online && self.gstates[Provider::Fontshare.idx()] == GState::Ready && self.provider_shown(Provider::Fontshare) {
+            self.gcat
+                .iter()
+                .filter(|g| g.provider == Provider::Fontshare && !g.preview_src.is_empty() && !self.lib_names.contains(&g.name))
+                .cloned()
+                .collect()
+        } else {
+            vec![]
+        };
+        let online_families: Vec<google::GFamily> = if use_online {
+            self.gcat
+                .iter()
+                .filter(|g| matches!(g.provider, Provider::Google | Provider::Fontshare) && g.nstyles > 1 && self.provider_shown(g.provider))
+                .cloned()
+                .collect()
+        } else {
+            vec![]
+        };
         let input = fontmatch::JobInput {
             sample,
             letters,
@@ -320,6 +342,9 @@ impl FontCraftApp {
             readers,
             google_ready: gready,
             google_missing: gmissing,
+            fontshare,
+            online_families,
+            online: self.shot.is_none(),
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let rx = fontmatch::spawn(input, cancel.clone(), self.ctx.clone());
@@ -401,7 +426,10 @@ impl FontCraftApp {
                     ui.label(RichText::new("Font finder").size(21.0).strong().color(p.text));
                     ui.add_space(8.0);
                     ui.label(
-                        RichText::new("Find the font in a picture – compared with your own fonts and Google Fonts, right on this computer.")
+                        RichText::new(
+                            "Find the font in a picture – compared with your own fonts, Google Fonts and Fontshare in all their styles, \
+                             right on this computer.",
+                        )
                             .size(12.5)
                             .color(p.weak),
                     );
@@ -487,7 +515,8 @@ impl FontCraftApp {
             "1.  FontCraft finds the letters in the picture and reads them.",
             "2.  Drag a box around the text you care about; click a letter to leave it out, right-click it to cut touching letters apart.",
             "3.  Fix the letters if they were misread – the more letters you confirm, the better the match.",
-            "4.  Every font in your library, on this computer and on Google Fonts is compared, closest first.",
+            "4.  Every font in your library, on this computer, on Google Fonts and on Fontshare is compared, closest first – \
+             the closest free families in all their styles (light, bold, italic…).",
         ] {
             ui.label(RichText::new(line).size(12.5).color(p.weak));
         }
@@ -730,16 +759,25 @@ impl FontCraftApp {
             });
         }
         ui.add_space(10.0);
+        // only the online sources that are switched on in Settings
+        let (use_g, use_fs) = (self.provider_shown(Provider::Google), self.provider_shown(Provider::Fontshare));
+        let count = |pv: Provider, on: bool| if on { self.gcat.iter().filter(|g| g.provider == pv).count() } else { 0 };
+        let parts: Vec<String> = [(count(Provider::Google, use_g), "Google Fonts", use_g), (count(Provider::Fontshare, use_fs), "Fontshare", use_fs)]
+            .iter()
+            .filter(|(_, _, on)| *on)
+            .map(|(n, l, _)| format!("{n} {l}"))
+            .collect();
         let gtxt = match &self.gstates[0] {
-            GState::Ready => format!("Also compare Google Fonts ({} families)", self.gcat.iter().filter(|g| g.provider == Provider::Google).count()),
-            GState::Loading => "Also compare Google Fonts (list is loading…)".to_string(),
-            GState::Failed(_) => "Also compare Google Fonts (not reachable right now)".to_string(),
+            GState::Ready => format!("Also compare free online fonts ({} families, all styles of the closest)", parts.join(" + ")),
+            GState::Loading => "Also compare free online fonts (list is loading…)".to_string(),
+            GState::Failed(_) => "Also compare free online fonts (Google Fonts not reachable right now)".to_string(),
         };
         let mut inc = !self.finder.skip_google;
-        if ui
-            .checkbox(&mut inc, RichText::new(gtxt).size(12.5))
-            .on_hover_text("The first time, FontCraft fetches just the letters of each Google family (a few KB each). Your picture is never uploaded.")
-            .changed()
+        if (use_g || use_fs)
+            && ui
+                .checkbox(&mut inc, RichText::new(gtxt).size(12.5))
+                .on_hover_text("The first time, FontCraft fetches just the letters of each family (a few KB each). Your picture is never uploaded.")
+                .changed()
         {
             self.finder.skip_google = !inc;
             self.finder_search_again();
@@ -826,18 +864,19 @@ impl FontCraftApp {
         // best style per family
         let mut seen = HashSet::new();
         let rows: Vec<(Cand, f32)> =
-            self.finder.results.iter().filter(|(c, _)| seen.insert((c.google, c.family.clone()))).take(SHOW).cloned().collect();
+            self.finder.results.iter().filter(|(c, _)| seen.insert((c.provider, c.family.clone()))).take(SHOW).cloned().collect();
         if rows.is_empty() {
             if self.finder.job.is_none() && self.finder.searched {
-                ui.label(RichText::new("No fonts to compare yet – add fonts to your library or include Google Fonts.").color(p.weak));
+                ui.label(RichText::new("No fonts to compare yet – add fonts to your library or include the free online fonts.").color(p.weak));
             }
             return;
         }
         for (rank, (c, score)) in rows.iter().enumerate() {
             let row_h = 30.0 + size * 1.3;
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
-            let fi = if c.google { None } else { self.face_by_id.get(&c.id).copied().map(|f| self.face_fam[f]) };
-            let gi = if c.google { self.gcat.iter().position(|g| g.provider == Provider::Google && g.name == c.family) } else { None };
+            let online = c.provider.is_some();
+            let fi = if online { None } else { self.face_by_id.get(&c.id).copied().map(|f| self.face_fam[f]) };
+            let gi = c.provider.and_then(|pv| self.gcat.iter().position(|g| g.provider == pv && g.name == c.family));
             let selected = fi.map(|f| self.primary == Some(f)).unwrap_or(false) || (gi.is_some() && self.gsel == gi && self.primary.is_none());
             let painter = ui.painter_at(rect);
             if selected {
@@ -885,8 +924,10 @@ impl FontCraftApp {
                     let (a, n) = self.fam_state(f);
                     if a == n && n > 0 { "in your library · active".into() } else { "in your library".into() }
                 }
-                None if c.google => "Google Fonts · free".into(),
-                None => String::new(),
+                None => match c.provider {
+                    Some(pv) => format!("{} · free", pv.label()),
+                    None => String::new(),
+                },
             };
             painter.text(pos2(after, hy), Align2::LEFT_CENTER, src, FontId::proportional(11.0), p.weak.gamma_multiply(0.85));
             // preview in the font
@@ -901,12 +942,13 @@ impl FontCraftApp {
             }
             // what you can do with it
             let br = Rect::from_min_max(pos2(rect.right() - 146.0, rect.top() + 4.0), pos2(rect.right() - 8.0, rect.bottom() - 4.0));
-            let bw = if c.google { 86.0 } else { 64.0 };
+            let bw = if online { 86.0 } else { 64.0 };
             let brect = Rect::from_center_size(pos2(br.right() - bw / 2.0, br.center().y), vec2(bw, 26.0));
             // a child area, so the buttons don't move the list's layout
             let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(brect));
-            if c.google {
-                if self.gjobs.contains(&c.family) {
+            if online {
+                let busy = gi.map(|g| self.gjobs.contains(&self.gcat[g].key())).unwrap_or(false) || self.gjobs.contains(&c.family);
+                if busy {
                     bui.put(brect, egui::Spinner::new());
                 } else if bui
                     .put(brect, egui::Button::new(RichText::new("Get font").color(Color32::BLACK)).fill(p.accent).corner_radius(CornerRadius::same(10)))

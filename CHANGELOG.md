@@ -1,5 +1,41 @@
 # What's new in FontCraft
 
+## 1.3.2
+
+### New: make a new font folder from inside FontCraft
+* The + next to Folders opens a small menu: **a new folder in your standard font folder**, **a new folder
+  anywhere** (or add an existing one), or **a network folder**. FontCraft creates the folder on your disk and makes it
+  a font folder right away. Right-click a folder › "New subfolder…" makes one inside it.
+* Mark your main font folder as **standard** with the star in Settings › Library & folders (or right-click it). It
+  shows a ★ in the sidebar.
+* Folders without fonts now show in the folder tree too, with 0, also sub-folders of your font folders. Only font
+  files (.ttf, .otf, .ttc, .otc) count – any other files in a folder are ignored, and hidden folders are left out.
+* An empty folder says so and offers to open it, so you can copy fonts in; they appear within seconds.
+
+### Settings inside the main window
+* Settings no longer float above the app: they open in the main area of the window, where the fonts are, with the
+  list of sections on the left. The sidebar stays where it is – choosing something in it, "Back to the fonts",
+  the gear button or Esc returns to the fonts.
+
+### Switch off online sources you don't use
+* Settings › Library & folders has a switch for each free online source – Google Fonts, Fontshare and Font
+  Squirrel. A source that is off disappears from the sidebar; with all three off, the whole Providers section is
+  gone. The Font finder and auto-activation then don't use it either. Fonts you already got from it stay in your
+  library.
+
+### Duplicates shown more precisely
+* A font's details now list only the styles that really are in more than one file, each with its files: the
+  original first, the copies marked "duplicate". The family's other styles are no longer listed there.
+
+### Font finder: more fonts, every style
+* The Font finder now also compares the 100 Fontshare families (fetched once, then kept on your computer).
+* Lettering is often set in a light, bold, black or italic style. After the first pass, FontCraft now fetches all
+  styles of the 30 closest free families (Google Fonts and Fontshare) and compares those too – so "Roboto Slab
+  Extra Bold" is found as exactly that, not just as "Roboto Slab". Only the few letters it compares are
+  downloaded, and only the first time.
+* Results show where a match comes from (your library, this computer, Google Fonts or Fontshare) and its style;
+  "Get font" works for Fontshare families as well.
+
 ## 1.3.1
 
 ### New: right-to-left fonts (Arabic, Hebrew, Persian, Urdu…)
